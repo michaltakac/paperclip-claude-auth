@@ -20,20 +20,34 @@ export const DEFAULT_ALLOWED_AUTH_HOSTS = ["claude.com", "www.claude.com"] as co
 /** Path the OAuth authorize URL must use. */
 const AUTHORIZE_PATH = "/cai/oauth/authorize";
 
+/**
+ * Markers are matched whitespace-tolerantly (`\s*` between words) because the
+ * terminal does not always emit literal spaces — see {@link renderTerminalText}.
+ * Even with cursor-forward restored, a wrap can land mid-phrase.
+ */
+
 /** Emitted once the browser authorization succeeds. */
-const SUCCESS_MARKER = "Long-lived authentication token created successfully";
+const SUCCESS_MARKER = /Long-?\s*lived\s*authentication\s*token\s*created\s*successfully/i;
 
 /** Precedes the token itself. */
-const TOKEN_HEADING = /Your OAuth token \(valid for [^)]+\):/;
+const TOKEN_HEADING = /Your\s*OAuth\s*token\s*\(\s*valid\s*for[^)]*\)\s*:/i;
 
 /** The interactive prompt that waits for the browser code. */
-const CODE_PROMPT = /Paste code here if prompted\s*>/;
+const CODE_PROMPT = /Paste\s*code\s*here\s*if\s*prompted/i;
 
 /** OSC 8 hyperlink: ESC ] 8 ; params ; URI (BEL | ESC backslash) */
 const OSC8 = /\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 
 /** Any other OSC string. */
 const OSC_OTHER = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+/**
+ * Cursor-forward: `ESC [ n C`. Claude Code lays out words by *moving the
+ * cursor* rather than emitting spaces, so deleting this sequence glues the
+ * output into `Pastecodehereifprompted`. Restore it as spaces before stripping
+ * anything else — every phrase marker below depends on it.
+ */
+const CURSOR_FORWARD = /\x1b\[(\d*)C/g;
 
 /** CSI sequences (colour, cursor movement, erase, ...). */
 const CSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]/g;
@@ -64,6 +78,10 @@ export function renderTerminalText(raw: string): string {
   return raw
     .replace(OSC8, (_match, uri: string) => `\n${uri}\n`)
     .replace(OSC_OTHER, "")
+    // Restore cursor-forward as spaces BEFORE the general CSI strip removes it.
+    .replace(CURSOR_FORWARD, (_match, count: string) =>
+      " ".repeat(Math.min(80, Math.max(1, Number.parseInt(count || "1", 10)))),
+    )
     .replace(CSI, "")
     .replace(ESC_SINGLE, "")
     // A PTY uses CR to redraw spinner frames in place; treat it as a line break
@@ -155,7 +173,7 @@ export function derivePhase(
 ): SetupTokenPhase {
   const text = renderTerminalText(raw);
 
-  if (text.includes(SUCCESS_MARKER)) {
+  if (SUCCESS_MARKER.test(text)) {
     const token = extractToken(raw);
     return token
       ? { kind: "succeeded", token }

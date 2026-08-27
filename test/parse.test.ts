@@ -49,6 +49,49 @@ const successStream =
     "Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\r\n",
   ].join("");
 
+/**
+ * Claude Code lays out words by moving the cursor (`ESC [ n C`) instead of
+ * emitting spaces. Deleting that sequence renders `Pastecodehereifprompted`,
+ * which matched none of the phrase markers — so the prompt was never seen and,
+ * far worse, a *successful* sign-in was invisible and got reported as a
+ * rejected code. Observed live on 2.1.245.
+ */
+const cf = (n: number) => `${ESC}[${n}C`;
+
+const gluedSuccess = [
+  `${ESC}[?25lWelcome${cf(1)}to${cf(1)}Claude${cf(1)}Code${cf(1)}v2.1.245\r\n`,
+  link(AUTH_URL, "https://claude.com/cai/oauth/autho"),
+  `\r\nPaste${cf(1)}code${cf(1)}here${cf(1)}if${cf(1)}prompted${cf(1)}>${cf(1)}`,
+  "*******************\r\n",
+  `${ESC}[32m✓${ESC}[0m${cf(1)}Long-lived${cf(1)}authentication${cf(1)}token${cf(1)}created${cf(1)}successfully!\r\n\r\n`,
+  `Your${cf(1)}OAuth${cf(1)}token${cf(1)}(valid${cf(1)}for${cf(1)}1${cf(1)}year):\r\n\r\n`,
+  "sk-ant-oat01-GLUEDSPACINGTOKEN01234\r\n",
+].join("");
+
+describe("cursor-forward word spacing", () => {
+  it("restores spaces so phrase markers match", () => {
+    const text = renderTerminalText(gluedSuccess);
+    expect(text).toContain("Paste code here if prompted");
+    expect(text).toContain("Long-lived authentication token created successfully");
+  });
+
+  it("sees the prompt instead of stalling in awaiting_authorization", () => {
+    const prompt = gluedSuccess.split("*******************")[0]!;
+    expect(derivePhase(prompt).kind).toBe("awaiting_code");
+  });
+
+  it("detects success — the failure that reported a good code as rejected", () => {
+    expect(derivePhase(gluedSuccess)).toEqual({
+      kind: "succeeded",
+      token: "sk-ant-oat01-GLUEDSPACINGTOKEN01234",
+    });
+  });
+
+  it("expands a multi-column cursor-forward", () => {
+    expect(renderTerminalText(`a${cf(4)}b`)).toBe("a    b");
+  });
+});
+
 describe("renderTerminalText", () => {
   it("strips CSI sequences and surfaces hyperlink targets", () => {
     const text = renderTerminalText(promptStream);
