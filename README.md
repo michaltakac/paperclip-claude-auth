@@ -71,6 +71,20 @@ npm run typecheck
 npm run build
 ```
 
+### Building inside a Paperclip runtime
+
+Paperclip containers set `NODE_ENV=production`, so a plain `npm install` there
+silently skips devDependencies and the build fails with
+`Cannot find package 'esbuild'`. Use:
+
+```bash
+npm install --include=dev && npm run build
+```
+
+The source must also sit inside the host's bind mount to be visible from the
+container — e.g. `<paperclip-data>/plugin-src/paperclip-claude-auth`, which
+appears as `/paperclip/plugin-src/paperclip-claude-auth` inside it.
+
 `@paperclipai/plugin-sdk` is a peer dependency. Development pins `2026.707.0` exactly — the version installed on both target instances — so accidental use of a newer API is a compile error. Newer hosts run it fine (Ordillect CT 201 is on the newest build and loads the Honcho plugin against this same SDK).
 
 ## Licence
