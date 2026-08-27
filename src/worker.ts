@@ -57,28 +57,72 @@ function requireCompanyId(input: unknown): string {
   return companyId;
 }
 
+interface ResolvedConfig {
+  claudePath: string;
+  scriptPath: string;
+  claudeHome: string;
+}
+
+const DEFAULTS: ResolvedConfig = {
+  claudePath: "/usr/local/bin/claude",
+  scriptPath: "/usr/bin/script",
+  claudeHome: "",
+};
+
+let cachedConfig: ResolvedConfig | null = null;
+
+/**
+ * Resolve operator config lazily, inside a request.
+ *
+ * `ctx.config.get()` needs a company context and throws
+ * "company context is required" during `setup()`, which fails worker
+ * initialization outright. Every caller here is already company-scoped, so the
+ * read happens on first use and is cached — the values come from
+ * `instanceConfigSchema`, so they do not vary per company.
+ *
+ * A read failure falls back to defaults rather than breaking sign-in: an
+ * unconfigured instance should still work on a stock container layout.
+ */
+async function resolveConfig(ctx: {
+  config: { get(): Promise<Record<string, unknown>> };
+  logger: { warn(message: string, meta?: unknown): void };
+}): Promise<ResolvedConfig> {
+  if (cachedConfig) return cachedConfig;
+
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = await ctx.config.get();
+  } catch (error) {
+    ctx.logger.warn("Falling back to default configuration", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const pick = (key: keyof ResolvedConfig, fallback: string): string =>
+    typeof raw[key] === "string" && (raw[key] as string).trim()
+      ? (raw[key] as string).trim()
+      : fallback;
+
+  cachedConfig = {
+    claudePath: pick("claudePath", DEFAULTS.claudePath),
+    scriptPath: pick("scriptPath", DEFAULTS.scriptPath),
+    claudeHome: pick(
+      "claudeHome",
+      process.env.PAPERCLIP_HOME || process.env.HOME || "/paperclip",
+    ),
+  };
+  return cachedConfig;
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
-    const config = await ctx.config.get();
-    const claudePath =
-      typeof config.claudePath === "string" && config.claudePath
-        ? config.claudePath
-        : "/usr/local/bin/claude";
-    const scriptPath =
-      typeof config.scriptPath === "string" && config.scriptPath
-        ? config.scriptPath
-        : "/usr/bin/script";
-    const claudeHome =
-      typeof config.claudeHome === "string" && config.claudeHome
-        ? config.claudeHome
-        : process.env.PAPERCLIP_HOME || process.env.HOME || "/paperclip";
-
     ctx.actions.register(ACTIONS.start, async (input) => {
       const companyId = requireCompanyId(input);
 
       // Replace any earlier attempt rather than leaving a second PTY alive.
       sessions.get(companyId)?.session.cancel("Replaced by a new sign-in.");
 
+      const { claudePath, scriptPath, claudeHome } = await resolveConfig(ctx);
       const session = startSetupTokenSession({
         claudePath,
         scriptPath,
@@ -146,6 +190,7 @@ const plugin = definePlugin({
     ctx.data.register(ACTIONS.status, async (input) => {
       const companyId = requireCompanyId(input);
       const entry = sessions.get(companyId);
+      const { claudePath, claudeHome } = await resolveConfig(ctx);
       return {
         secretKey: TOKEN_SECRET_KEY,
         signInInProgress: Boolean(entry),
@@ -154,7 +199,9 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.logger.info("Claude sign-in plugin ready", { claudePath, claudeHome });
+    // Nothing company-scoped may be touched here: worker init has no company
+    // context, and anything that needs one fails initialization outright.
+    ctx.logger.info("Claude sign-in plugin ready");
   },
 
   async onShutdown() {
