@@ -31,7 +31,10 @@ const manifest: PaperclipPluginManifestV1 = {
   author: "Michal Takáč <hello@michaltakac.com>",
   categories: ["workspace"],
   capabilities: [
-    "ui.page.register",
+    // A `settingsPage` slot maps to `instance.settings.register`, not
+    // `ui.page.register` — see UI_SLOT_CAPABILITIES in the host's
+    // plugin-capability-validator.
+    "instance.settings.register",
     "ui.action.register",
     "plugin.state.read",
     "plugin.state.write",
