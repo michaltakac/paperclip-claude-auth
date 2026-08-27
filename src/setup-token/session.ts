@@ -17,13 +17,26 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { derivePhase, redactForLogs, type SetupTokenPhase } from "./parse.js";
+import {
+  checkCodeAgainstUrl,
+  derivePhase,
+  redactForLogs,
+  type SetupTokenPhase,
+} from "./parse.js";
 
 /** Default ceiling for a whole login. A human has to visit a browser in this window. */
 export const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Give up if Claude emits nothing at all for this long — it never reached the prompt. */
 export const DEFAULT_STARTUP_TIMEOUT_MS = 60 * 1000;
+
+/**
+ * How long to wait for a submitted code to be accepted.
+ *
+ * A rejected code is answered with silence, not an error, so this bound is the
+ * only thing that turns "wrong code" into a message instead of a hang.
+ */
+export const DEFAULT_CODE_ACCEPTANCE_TIMEOUT_MS = 90 * 1000;
 
 export interface SetupTokenSessionOptions {
   /** Absolute path to the `claude` executable. */
@@ -38,6 +51,7 @@ export interface SetupTokenSessionOptions {
   scriptPath?: string;
   sessionTimeoutMs?: number;
   startupTimeoutMs?: number;
+  codeAcceptanceTimeoutMs?: number;
   /** Called on every phase transition — never with raw terminal bytes. */
   onPhase?: (phase: SetupTokenPhase) => void;
 }
@@ -87,6 +101,7 @@ export function startSetupTokenSession(
     scriptPath = "/usr/bin/script",
     sessionTimeoutMs = DEFAULT_SESSION_TIMEOUT_MS,
     startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
+    codeAcceptanceTimeoutMs = DEFAULT_CODE_ACCEPTANCE_TIMEOUT_MS,
     onPhase,
   } = options;
 
@@ -95,6 +110,7 @@ export function startSetupTokenSession(
   let raw = "";
   let phase: SetupTokenPhase = { kind: "starting" };
   let settled = false;
+  let codeDeadline: ReturnType<typeof setTimeout> | null = null;
   let resolveDone: (phase: SetupTokenPhase) => void;
   const donePromise = new Promise<SetupTokenPhase>((resolve) => {
     resolveDone = resolve;
@@ -127,6 +143,7 @@ export function startSetupTokenSession(
     settled = true;
     clearTimeout(sessionTimer);
     clearTimeout(startupTimer);
+    if (codeDeadline) clearTimeout(codeDeadline);
     phase = next;
     onPhase?.(next);
     try {
@@ -179,13 +196,44 @@ export function startSetupTokenSession(
           reject(new Error("This sign-in is no longer active. Please start again."));
           return;
         }
+        const current = phase;
+        if (current.kind !== "awaiting_code" && current.kind !== "awaiting_authorization") {
+          reject(new Error("This sign-in is not ready for a code yet."));
+          return;
+        }
         try {
           assertSafeCode(code);
         } catch (error) {
           reject(error);
           return;
         }
-        child.stdin.write(`${code}\n`, (error) => (error ? reject(error) : resolve()));
+        // Claude gives no feedback at all on a bad code — it echoes the paste
+        // masked and then sits silently on the prompt forever. So check the
+        // code against the state this sign-in was issued with before spending
+        // the user's time on it.
+        const check = checkCodeAgainstUrl(code, current.authorizationUrl);
+        if (!check.ok) {
+          reject(new Error(check.reason));
+          return;
+        }
+        child.stdin.write(`${code.trim()}\n`, (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          // Silence is the only signal a code was rejected server-side, so the
+          // wait has to be bounded or the UI hangs forever.
+          codeDeadline = setTimeout(
+            () =>
+              settle({
+                kind: "failed",
+                reason:
+                  "Claude did not accept that code. Open the sign-in link again and copy the new code.",
+              }),
+            codeAcceptanceTimeoutMs,
+          );
+          resolve();
+        });
       }),
   };
 }

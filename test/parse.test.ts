@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  checkCodeAgainstUrl,
   derivePhase,
+  extractAuthorizationState,
   extractAuthorizationUrl,
   extractToken,
   isAllowedAuthorizationUrl,
@@ -154,6 +156,65 @@ describe("redactForLogs", () => {
     expect(redacted).toContain("<REDACTED_TOKEN>");
     expect(redacted).not.toContain("code_challenge=xyz");
     expect(redacted).not.toContain("state=st4te");
-    expect(redacted).toContain("/cai/oauth/authorize?<REDACTED>");
+  });
+
+  /**
+   * Regression: the terminal hard-wraps the authorization URL, so a fragment
+   * carrying the PKCE material appears on its own line with no scheme or host.
+   * A whole-URL rule matched the canonical line and let every wrapped fragment
+   * through. Observed on Claude Code 2.1.245.
+   */
+  it("redacts wrapped query fragments that carry no scheme or host", () => {
+    const wrappedLeak =
+      "https://claude.com/cai/oauth/authorize?client_id=abc\r\n" +
+      "ed-5944d1962f5e&response_type=code&scope=user%3Ainference&code_challenge=XcKITx3k50Z\r\n" +
+      "gsDHULB6VeTkBWJU0AO1wuO19ioBNH2I&code_challenge_method=S256&state=KM1IEoGZXDyqEMMI\r\n";
+    const redacted = redactForLogs(wrappedLeak);
+    expect(redacted).not.toContain("XcKITx3k50Z");
+    expect(redacted).not.toContain("KM1IEoGZXDyqEMMI");
+    expect(redacted).toContain("code_challenge=<REDACTED>");
+    expect(redacted).toContain("state=<REDACTED>");
+  });
+});
+
+describe("extractAuthorizationState", () => {
+  it("reads the state the sign-in was issued with", () => {
+    expect(extractAuthorizationState(AUTH_URL)).toBe("st4te");
+  });
+
+  it("returns null for a non-URL", () => {
+    expect(extractAuthorizationState("nonsense")).toBeNull();
+  });
+});
+
+/**
+ * Claude gives no feedback at all on a bad code: it echoes the paste masked and
+ * then sits silently on the prompt (characterized on 2.1.245 — no error, no
+ * re-prompt, no exit, for the full wait). So the only way a user learns their
+ * code is wrong is if we check it before submitting.
+ */
+describe("checkCodeAgainstUrl", () => {
+  it("accepts a code carrying the matching state", () => {
+    expect(checkCodeAgainstUrl("abc123#st4te", AUTH_URL)).toEqual({ ok: true });
+  });
+
+  it("rejects a code from an earlier sign-in", () => {
+    const result = checkCodeAgainstUrl("abc123#old5tate", AUTH_URL);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/different sign-in/i);
+  });
+
+  it("accepts a code with no state, rather than blocking an unknown format", () => {
+    expect(checkCodeAgainstUrl("justacode", AUTH_URL)).toEqual({ ok: true });
+  });
+
+  it("rejects an empty paste", () => {
+    expect(checkCodeAgainstUrl("   ", AUTH_URL).ok).toBe(false);
+  });
+
+  it("rejects a paste that carried along other text", () => {
+    const result = checkCodeAgainstUrl("the code is abc123#st4te", AUTH_URL);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/only the code/i);
   });
 });

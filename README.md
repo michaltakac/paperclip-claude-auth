@@ -2,7 +2,7 @@
 
 A Paperclip plugin that lets a **non-technical person sign in to Claude from the Paperclip UI** — no terminal, no SSH, no pasted shell commands.
 
-It drives `claude setup-token` on a pseudo-terminal in the background, shows the user a button and one input box, and stores the resulting **1-year** token where the `claude_local` adapter reads it.
+It drives `claude setup-token` on a pseudo-terminal in the background, shows the user a button and one input box, and binds the resulting **1-year** token as the `CLAUDE_CODE_OAUTH_TOKEN` secret the `claude_local` adapter reads.
 
 > Status: **early.** The `setup-token` parser and PTY session driver are implemented and tested. The manifest, worker wiring, and UI are in progress.
 
@@ -24,7 +24,7 @@ A `setup-token` credential is good for **a year** instead of ~46 days, and this 
 1. **Status** — reads the credential and shows *"Claude sign-in — valid until 27 Aug 2027"* or *"expired"*.
 2. **Sign in** — the worker spawns `claude setup-token` on a PTY, parses the authorization URL out of the terminal stream, and the UI renders it as a button.
 3. **Approve** — the user approves in their browser and pastes the code into a single field.
-4. **Store** — the plugin writes the token atomically to the Claude home the adapter reads, verifies with `claude auth status`, and shows the new expiry.
+4. **Store** — the token is bound as the `CLAUDE_CODE_OAUTH_TOKEN` secret through the host's own user-secret-definitions API, as the signed-in human. `setup-token` persists nothing itself, so the env-var binding is how the adapter actually receives it — see [DESIGN.md](DESIGN.md).
 
 The user never sees terminal output. That is the point.
 
@@ -40,7 +40,9 @@ script -qec "/usr/local/bin/claude setup-token" /dev/null
 
 That keeps the plugin pure JavaScript and installable from npm anywhere the host runs. (util-linux `script` only; the BSD/macOS flavour takes different arguments.)
 
-**The token is printed exactly once.** Claude says so itself — *"Store this token securely. You won't be able to see it again."* So the raw stream is held in memory, never written to disk, and only leaves the module through `redactForLogs()`, which strips both the token and the authorization URL's query (it carries the PKCE challenge and state).
+**The token is printed exactly once.** Claude says so itself — *"Store this token securely. You won't be able to see it again."* So the raw stream is held in memory, never written to disk, and only leaves the module through `redactForLogs()`, which strips the token and every OAuth query value. Redaction is per-parameter, not per-URL: the terminal hard-wraps the URL, so PKCE material appears on continuation lines with no scheme or host in front of it, and a whole-URL rule lets all of it through.
+
+**A bad code is answered with silence.** No error, no re-prompt, no exit — the process just sits there. So the code is validated against the sign-in's `state` *before* submission, and the wait after submission is bounded. There is nothing to parse, so there is nothing to wait for.
 
 **The authorization URL is validated before it becomes a button.** Only `https`, only an allow-listed host, only the `/cai/oauth/authorize` path. A URL we ask a user to click is a URL we have to vouch for.
 
@@ -69,7 +71,7 @@ npm run typecheck
 npm run build
 ```
 
-`@paperclipai/plugin-sdk` is a peer dependency; development pins `^2026.824.1`. Hosts older than that release expose an older context surface — check before installing on one.
+`@paperclipai/plugin-sdk` is a peer dependency. Development pins `2026.707.0` exactly — the version installed on both target instances — so accidental use of a newer API is a compile error. Newer hosts run it fine (Ordillect CT 201 is on the newest build and loads the Honcho plugin against this same SDK).
 
 ## Licence
 

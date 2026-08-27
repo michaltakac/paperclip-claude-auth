@@ -175,18 +175,91 @@ export function derivePhase(
     : { kind: "awaiting_authorization", authorizationUrl };
 }
 
+/** Query parameters whose values must never reach a log. */
+const SENSITIVE_QUERY_KEYS = ["code_challenge", "state", "client_id", "code"] as const;
+
 /**
  * Redact a PTY stream so it can be logged.
  *
- * Removes the token and the authorization URL's query, which carries the PKCE
+ * Removes the token and the OAuth query parameters, which carry the PKCE
  * challenge and state. Use this on every path that writes PTY output anywhere.
+ *
+ * Redaction is done per-parameter rather than per-URL on purpose. The terminal
+ * hard-wraps the authorization URL across display lines, so a continuation
+ * fragment like `...&code_challenge=XcK...&state=KM1...` appears with no scheme
+ * or host in front of it. An earlier whole-URL rule matched the canonical line
+ * and let every wrapped fragment through — which is precisely the material this
+ * function exists to suppress. Observed on Claude Code 2.1.245.
  */
 export function redactForLogs(raw: string): string {
   let text = renderTerminalText(raw);
   const token = extractToken(raw);
   if (token) text = text.split(token).join("<REDACTED_TOKEN>");
-  return text.replace(
-    /(https:\/\/[^\s?]+\/cai\/oauth\/authorize)\?\S*/g,
-    "$1?<REDACTED>",
-  );
+  for (const key of SENSITIVE_QUERY_KEYS) {
+    text = text.replace(
+      new RegExp(`(\\b${key}=)[^&\\s]+`, "g"),
+      "$1<REDACTED>",
+    );
+  }
+  return text;
+}
+
+/**
+ * The `state` the authorization URL was issued with.
+ *
+ * The browser hands the user back a code carrying this same state, which is the
+ * only way to tell a mistyped or stale code from a good one — see
+ * {@link checkCodeAgainstUrl}.
+ */
+export function extractAuthorizationState(authorizationUrl: string): string | null {
+  try {
+    return new URL(authorizationUrl).searchParams.get("state");
+  } catch {
+    return null;
+  }
+}
+
+export type CodeCheck = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Check a pasted code against the sign-in it belongs to, before submitting it.
+ *
+ * This exists because Claude Code gives **no feedback whatsoever** on a bad
+ * code: the code is echoed masked and the process then sits silently on its
+ * prompt indefinitely (characterized on 2.1.245 — no error, no re-prompt, no
+ * exit). There is no message to parse, so the only way to tell a user their
+ * code was wrong is to check it ourselves first.
+ *
+ * The browser returns `<code>#<state>`. When the paste carries a state we can
+ * compare it; when it carries none we cannot verify it and let it through
+ * rather than block a flow whose format changed.
+ */
+export function checkCodeAgainstUrl(code: string, authorizationUrl: string): CodeCheck {
+  const trimmed = code.trim();
+  if (!trimmed) {
+    return { ok: false, reason: "Paste the code from your browser to continue." };
+  }
+  if (/\s/.test(trimmed)) {
+    return {
+      ok: false,
+      reason: "That looks like more than just the code — paste only the code your browser showed.",
+    };
+  }
+
+  const separator = trimmed.indexOf("#");
+  if (separator === -1) return { ok: true };
+
+  const pastedState = trimmed.slice(separator + 1);
+  const expectedState = extractAuthorizationState(authorizationUrl);
+  if (!expectedState) return { ok: true };
+
+  if (pastedState !== expectedState) {
+    return {
+      ok: false,
+      reason:
+        "That code belongs to a different sign-in — it was probably copied from an earlier attempt. " +
+        "Open the link again and copy the new code.",
+    };
+  }
+  return { ok: true };
 }

@@ -76,8 +76,23 @@ The token is printed exactly once and cannot be retrieved again, so:
 - the authorization URL is validated — https, allow-listed host, `/cai/oauth/authorize` — before the UI renders it as a clickable button;
 - a success claim with an unreadable token fails loudly rather than binding whatever text was there.
 
+## A bad code is answered with silence
+
+Characterized on Claude Code 2.1.245 by driving a real login with a deliberately wrong code: the paste is echoed **masked** (`***********************`) and the process then sits on its prompt with **no error, no re-prompt, and no exit** for the full wait, until it is killed.
+
+So there is no rejection message to parse, and a UI that waits for one hangs forever. Two consequences:
+
+1. **Check the code before submitting it.** The authorization URL carries a `state`, and the browser returns `<code>#<state>`. `checkCodeAgainstUrl()` compares them and rejects a mismatch instantly with a message Claude never gives — *"That code belongs to a different sign-in."* A paste with no `#` cannot be verified and is allowed through rather than blocking a format we do not recognise.
+2. **Bound the wait after submitting.** `DEFAULT_CODE_ACCEPTANCE_TIMEOUT_MS` (90 s) turns silence into *"Claude did not accept that code"*, because silence is the only failure signal there is.
+
+## Host version floor
+
+Development pins `@paperclipai/plugin-sdk@2026.707.0` — **exactly**, not a caret — because it is the version installed on both target instances: Ordillect CT 201 (newest fork build) and MHA CT 103 (July build). Pinning the floor makes accidental use of a newer API a compile error.
+
+Forward compatibility is observed, not promised: CT 201 runs the newest host and its plugin store loads the Honcho plugin against this same 2026.707.0 SDK today. Re-check it at each host upgrade. `peerDependencies` expresses the floor as `>=2026.707.0`.
+
+Everything the design needs is present in 2026.707.0: `data`, `actions`, `launchers`, `jobs`, `logger` (and `localFolders`, `secrets`, `state`, `activity`, `http`, `tools`, `agents`, `companies`).
+
 ## Still open
 
 - **Where the binding lands by default.** Company-scoped secret vs per-agent binding, and what the plugin should do when a definition for `CLAUDE_CODE_OAUTH_TOKEN` already exists (update in place is the obvious answer; needs confirming against the PATCH contract).
-- **The invalid-code retry path.** Upstream's fixture mentions it but does not record its text. The parser currently treats a re-appearing prompt as "still awaiting code"; that should be characterized properly so the UI can say "that code was rejected".
-- **Host version floor.** Development pins `@paperclipai/plugin-sdk@^2026.824.1`. Older hosts expose an older context surface — MHA's instance is on a July build and would need an upgrade, or a compatibility pass, before this installs there.
