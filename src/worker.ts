@@ -33,10 +33,17 @@ export interface PublicStatus {
   /**
    * What Claude is showing, redacted.
    *
-   * Safe to display: `redactForLogs` removes the token and every OAuth query
-   * value, and the submitted code is masked by Claude itself. Sending it on
-   * every poll is what turns an opaque wait into something a user can read —
-   * and what makes a failure diagnosable without a console.
+   * Safe to *display*: `redactForLogs` removes the token and every OAuth query
+   * value, and the submitted code is redacted by us rather than trusted to
+   * Claude's masking. Sending it on every poll is what turns an opaque wait
+   * into something a user can read — and what makes a failure diagnosable
+   * without a console.
+   *
+   * ⚠ UNTRUSTED. This is output from a subprocess and is rendered as escaped
+   * React text, never as HTML. Do not feed it to an LLM — not to summarise a
+   * failure, not to auto-triage diagnostics. A subprocess that could place
+   * text here would otherwise have a direct path into a model's instructions.
+   * There is no such sink today; this note exists so that stays true.
    */
   transcript?: string;
 }
@@ -187,7 +194,23 @@ async function resolveConfig(ctx: {
   return cachedConfig;
 }
 
-const plugin = definePlugin({
+/** Injectable so ownership and one-time delivery can be tested without a PTY. */
+export type StartSession = typeof startSetupTokenSession;
+
+/**
+ * Build the plugin.
+ *
+ * Exposed as a factory so tests can substitute the session driver and start
+ * from clean state. Security-relevant state leaking between test cases turns
+ * an assertion into a coincidence, so every call resets it.
+ */
+export function createClaudeAuthPlugin(deps: { startSession?: StartSession } = {}) {
+  const startSession = deps.startSession ?? startSetupTokenSession;
+  sessions.clear();
+  lastTranscripts.clear();
+  cachedConfig = null;
+
+  return definePlugin({
   async setup(ctx) {
     ctx.actions.register(ACTIONS.start, async (_input, context) => {
       const { companyId, userId } = requireActor(context);
@@ -202,7 +225,7 @@ const plugin = definePlugin({
       existing?.session.cancel("Replaced by a new sign-in.");
 
       const { claudePath, scriptPath, claudeHome } = await resolveConfig(ctx);
-      const session = startSetupTokenSession({
+      const session = startSession({
         claudePath,
         scriptPath,
         home: claudeHome,
@@ -303,7 +326,10 @@ const plugin = definePlugin({
     for (const { session } of sessions.values()) session.cancel("The plugin is shutting down.");
     sessions.clear();
   },
-});
+  });
+}
+
+const plugin = createClaudeAuthPlugin();
 
 export default plugin;
 runWorker(plugin, import.meta.url);

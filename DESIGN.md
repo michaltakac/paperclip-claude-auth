@@ -93,6 +93,20 @@ Forward compatibility is observed, not promised: CT 201 runs the newest host and
 
 Everything the design needs is present in 2026.707.0: `data`, `actions`, `launchers`, `jobs`, `logger` (and `localFolders`, `secrets`, `state`, `activity`, `http`, `tools`, `agents`, `companies`).
 
+## Security posture
+
+Reviewed externally on 2026-08-28; the findings below were acted on rather than noted.
+
+**Scope and ownership come from the host, never from the caller.** The SDK supplies an immutable authenticated actor context — *"resolved by the host, never by caller params"* — and an earlier version ignored it, keying sessions on a `companyId` taken from input. Since the first successful poll receives the one-year token, any principal reaching this company's actions could have replaced, driven or harvested someone else's sign-in. Sessions now record an owner; `poll`, `submit-code`, `cancel` and `diagnostics` all refuse a non-owner; and an **agent principal is refused outright**, because an agent able to drive this flow could collect the credential it produces. Covered by tests in `test/worker.test.ts`.
+
+**The subprocess gets an allowlisted environment.** It previously inherited the worker's, which on a real deployment includes `DATABASE_URL`, provider keys and internal tokens — none of a login subprocess's business. Both executable paths are validated against shell metacharacters, since `script -c` interpolates them into a shell and both come from editable configuration.
+
+**PTY output is bounded** at 32 KB head plus 32 KB tail. Both ends are kept because the authorization URL arrives first and the success block last. It was previously unbounded and fully re-parsed on every chunk.
+
+**The submitted code is redacted by us**, not left to Claude's masking — that is the CLI's current behaviour, not a guarantee we can rely on. Transcripts expire after 30 minutes and are readable only by the user whose run produced them.
+
+**The transcript is untrusted output and must never reach an LLM.** It is rendered as escaped React text and returned by an action. There is no prompt-injection sink today, and there should not be one: auto-triaging a failure by feeding this to a model would give any subprocess that can write to the terminal a direct path into that model's instructions.
+
 ## Still open
 
 - **Where the binding lands by default.** Company-scoped secret vs per-agent binding, and what the plugin should do when a definition for `CLAUDE_CODE_OAUTH_TOKEN` already exists (update in place is the obvious answer; needs confirming against the PATCH contract).
