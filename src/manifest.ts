@@ -25,7 +25,7 @@ export const ACTIONS = {
 const manifest: PaperclipPluginManifestV1 = {
   id: "ordillect.claude-auth",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "1.0.0",
   displayName: "Claude Sign-in",
   description:
     "Sign in to Claude from the Paperclip UI. Runs `claude setup-token` in the background and binds the resulting 1-year token as the CLAUDE_CODE_OAUTH_TOKEN company secret. Works on local environments.",

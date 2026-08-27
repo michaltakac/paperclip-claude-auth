@@ -4,7 +4,14 @@ A Paperclip plugin that lets a **non-technical person sign in to Claude from the
 
 It drives `claude setup-token` on a pseudo-terminal in the background, shows the user a button and one input box, and binds the resulting **1-year** token as the `CLAUDE_CODE_OAUTH_TOKEN` secret the `claude_local` adapter reads.
 
-> Status: **early.** The `setup-token` parser and PTY session driver are implemented and tested. The manifest, worker wiring, and UI are in progress.
+Verified end to end on a self-hosted Paperclip instance: sign-in completes, the token is stored as a company secret, and Claude agents are connected to it.
+
+```bash
+# in the Paperclip Plugin Manager → Install Plugin
+paperclip-claude-auth
+```
+
+Requires `@paperclipai/plugin-sdk` **2026.707.0 or newer** on the host, and a Linux runtime with util-linux `script` and the `claude` CLI available (both standard in the Paperclip container).
 
 ## Why this exists
 
@@ -24,7 +31,8 @@ A `setup-token` credential is good for **a year** instead of ~46 days, and this 
 1. **Status** — reads the credential and shows *"Claude sign-in — valid until 27 Aug 2027"* or *"expired"*.
 2. **Sign in** — the worker spawns `claude setup-token` on a PTY, parses the authorization URL out of the terminal stream, and the UI renders it as a button.
 3. **Approve** — the user approves in their browser and pastes the code into a single field.
-4. **Store** — the token is bound as the `CLAUDE_CODE_OAUTH_TOKEN` secret through the host's own user-secret-definitions API, as the signed-in human. `setup-token` persists nothing itself, so the env-var binding is how the adapter actually receives it — see [DESIGN.md](DESIGN.md).
+4. **Store** — the token is saved as the company secret `CLAUDE_CODE_OAUTH_TOKEN` (rotated in place if one already exists, keeping version history) and bound into the environment of every `claude_local` agent that does not already have one. `setup-token` persists nothing itself, so that binding is how agents actually receive it — see [DESIGN.md](DESIGN.md).
+5. **Afterwards** — the panel reports the stored credential: when it was minted, when it expires, how many days remain, and a warning as expiry approaches. Signing in again renews it.
 
 The user never sees terminal output. That is the point.
 

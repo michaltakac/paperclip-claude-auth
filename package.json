@@ -1,6 +1,6 @@
 {
   "name": "paperclip-claude-auth",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Sign in to Claude from the Paperclip UI. Drives `claude setup-token` on a pseudo-terminal and stores the resulting 1-year token where the claude_local adapter reads it. Works on local environments.",
   "license": "MIT",
@@ -12,7 +12,8 @@
     "build": "node ./esbuild.config.mjs",
     "dev": "node ./esbuild.config.mjs --watch",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
@@ -43,5 +44,12 @@
     "react": "^19.2.8",
     "typescript": "^5.6.0",
     "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/michaltakac/paperclip-claude-auth#readme",
+  "bugs": {
+    "url": "https://github.com/michaltakac/paperclip-claude-auth/issues"
   }
 }
