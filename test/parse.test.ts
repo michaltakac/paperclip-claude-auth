@@ -105,8 +105,12 @@ describe("cursor-horizontal-absolute word spacing", () => {
     expect(renderTerminalText(`Welcome${cha(9)}to${cha(12)}Claude`)).toBe("Welcome to Claude");
   });
 
-  it("resets the column on a line break", () => {
-    expect(renderTerminalText(`abc\r\n${cha(3)}x`)).toBe("abc\n\n  x");
+  it("resets the column on a line break, counting CRLF once", () => {
+    expect(renderTerminalText(`abc\r\n${cha(3)}x`)).toBe("abc\n  x");
+  });
+
+  it("still breaks on a lone CR, so a spinner frame cannot glue onto what follows", () => {
+    expect(renderTerminalText("frame\rdone")).toBe("frame\ndone");
   });
 
   it("never moves backwards", () => {
@@ -190,6 +194,38 @@ describe("isAllowedAuthorizationUrl", () => {
     ["not a url", false],
   ])("%s -> %s", (value, expected) => {
     expect(isAllowedAuthorizationUrl(value)).toBe(expected);
+  });
+});
+
+/**
+ * Regression: a ~108-character token wrapped across an 80-column PTY was read
+ * as its first line only. The truncated string still looked like a credential,
+ * so it was stored and bound, and only surfaced when an agent got
+ * `401 OAuth access token is invalid`.
+ */
+describe("extractToken across a terminal wrap", () => {
+  const WRAPPED_TOKEN =
+    "sk-ant-oat01-" + "W".repeat(60) + "-" + "z".repeat(34);
+
+  const wrappedSuccess =
+    "✓ Long-lived authentication token created successfully!\r\n\r\n" +
+    "Your OAuth token (valid for 1 year):\r\n\r\n" +
+    WRAPPED_TOKEN.slice(0, 80) + "\r\n" +
+    WRAPPED_TOKEN.slice(80) + "\r\n\r\n" +
+    "Store this token securely. You won't be able to see it again.\r\n";
+
+  it("rejoins the wrapped halves", () => {
+    expect(extractToken(wrappedSuccess)).toBe(WRAPPED_TOKEN);
+    expect(extractToken(wrappedSuccess)).toHaveLength(108);
+  });
+
+  it("stops at the prose that follows, never absorbing it", () => {
+    const token = extractToken(wrappedSuccess);
+    expect(token).not.toMatch(/Store|securely/);
+  });
+
+  it("reports success with the whole token", () => {
+    expect(derivePhase(wrappedSuccess)).toEqual({ kind: "succeeded", token: WRAPPED_TOKEN });
   });
 });
 

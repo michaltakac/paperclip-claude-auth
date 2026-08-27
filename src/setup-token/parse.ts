@@ -122,12 +122,15 @@ export function renderTerminalText(raw: string): string {
       continue;
     }
 
-    // A PTY redraws in place with CR; treat both as line breaks so a spinner
-    // frame can never glue itself to the text that follows.
+    // A PTY redraws in place with CR, so a lone CR is treated as a line break —
+    // that keeps a spinner frame from gluing onto the text after it. But CRLF
+    // is ONE break, not two: mapping each half separately inserted a blank line
+    // after every real line, which made a wrapped token look like it had ended
+    // and truncated the credential.
     if (char === "\r" || char === "\n") {
       out += "\n";
       column = 0;
-      i += 1;
+      i += char === "\r" && source[i + 1] === "\n" ? 2 : 1;
       continue;
     }
 
@@ -188,10 +191,16 @@ export function isAllowedAuthorizationUrl(
 /**
  * Pull the one-time token out of a completed session.
  *
- * The token sits on its own line after the "Your OAuth token" heading. We take
- * the first non-empty line and reject anything that looks like prose, so a
- * wording change upstream degrades into "not found" rather than binding a
- * sentence as a credential.
+ * **The token wraps.** `script` allocates an 80-column pseudo-terminal and the
+ * credential is ~108 characters, so it arrives split across two display lines.
+ * An earlier version took only the first line and stored a truncated token,
+ * which Anthropic rejected with `401 OAuth access token is invalid` — and,
+ * because the truncated string still looked like a credential, nothing caught
+ * it until an agent tried to use it.
+ *
+ * So consecutive whitespace-free lines are joined. Prose ends the run: the
+ * block is followed by a blank line and "Store this token securely", and any
+ * line containing a space is text rather than more credential.
  */
 export function extractToken(raw: string): string | null {
   const text = renderTerminalText(raw);
@@ -199,12 +208,23 @@ export function extractToken(raw: string): string | null {
   if (!heading || heading.index === undefined) return null;
 
   const after = text.slice(heading.index + heading[0].length);
+  const parts: string[] = [];
+
   for (const line of after.split("\n")) {
     const candidate = line.trim();
-    if (!candidate) continue;
-    return looksLikeToken(candidate) ? candidate : null;
+    if (!candidate) {
+      // Blank lines precede the token; once it has started, one ends it.
+      if (parts.length) break;
+      continue;
+    }
+    // Prose, not credential — stop rather than append a sentence.
+    if (/\s/.test(candidate) || !/^[\x21-\x7e]+$/.test(candidate)) break;
+    parts.push(candidate);
   }
-  return null;
+
+  if (!parts.length) return null;
+  const token = parts.join("");
+  return looksLikeToken(token) ? token : null;
 }
 
 /**
