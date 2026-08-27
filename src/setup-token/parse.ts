@@ -35,25 +35,30 @@ const TOKEN_HEADING = /Your\s*OAuth\s*token\s*\(\s*valid\s*for[^)]*\)\s*:/i;
 /** The interactive prompt that waits for the browser code. */
 const CODE_PROMPT = /Paste\s*code\s*here\s*if\s*prompted/i;
 
+/**
+ * Claude reports a rejected code explicitly — `OAuth error: Request failed with
+ * status code 400`, followed by `Press Enter to retry.` Detecting it turns a
+ * 90-second wait into an immediate, accurate answer.
+ *
+ * The message is redrawn with cursor motion, so words can be split mid-token;
+ * match loosely and report what we can read.
+ */
+const OAUTH_ERROR = /OAuth\s*error\s*:?\s*([^\n]{0,120})/i;
+
 /** OSC 8 hyperlink: ESC ] 8 ; params ; URI (BEL | ESC backslash) */
 const OSC8 = /\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 
 /** Any other OSC string. */
 const OSC_OTHER = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
-/**
- * Cursor-forward: `ESC [ n C`. Claude Code lays out words by *moving the
- * cursor* rather than emitting spaces, so deleting this sequence glues the
- * output into `Pastecodehereifprompted`. Restore it as spaces before stripping
- * anything else — every phrase marker below depends on it.
- */
-const CURSOR_FORWARD = /\x1b\[(\d*)C/g;
+/** One CSI sequence, anchored: params, intermediates, final byte. */
+const CSI_ONE = /^\x1b\[([0-9;?]*)([ -\/]*)([@-~])/;
 
-/** CSI sequences (colour, cursor movement, erase, ...). */
-const CSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]/g;
+/** One two-character escape, anchored. */
+const ESC_SINGLE_ONE = /^\x1b[@-Z\\-_]/;
 
-/** Single-character escapes left over after the above. */
-const ESC_SINGLE = /\x1b[@-Z\\-_]/g;
+/** Never emit an unbounded run of spaces from a malformed column value. */
+const MAX_PAD_COLUMNS = 200;
 
 export type SetupTokenPhase =
   /** Process started, nothing recognisable emitted yet. */
@@ -68,25 +73,70 @@ export type SetupTokenPhase =
   | { kind: "failed"; reason: string };
 
 /**
- * Strip terminal control sequences, leaving readable text.
+ * Render terminal output as readable text.
  *
- * OSC 8 hyperlinks are replaced by their URI so a wrapped display URL never has
- * to be reassembled from screen output — the hyperlink parameter carries the
- * whole thing on one line.
+ * Claude Code positions words with **cursor motion, not spaces**:
+ * `Welcome\x1b[9Gto\x1b[12GClaude`. Deleting those sequences yields
+ * `WelcometoClaude`, which matches none of the phrase markers — so the prompt
+ * was never detected and, worse, a successful sign-in was invisible.
+ *
+ * So this walks the stream keeping a column counter and turns cursor motion
+ * back into spaces:
+ *   - `ESC [ n G` — cursor horizontal absolute: pad out to column n.
+ *   - `ESC [ n C` — cursor forward: emit n spaces.
+ * Everything else is dropped. OSC 8 hyperlink targets are lifted onto their own
+ * line first, so a wrapped URL never has to be reassembled from screen text.
  */
 export function renderTerminalText(raw: string): string {
-  return raw
-    .replace(OSC8, (_match, uri: string) => `\n${uri}\n`)
-    .replace(OSC_OTHER, "")
-    // Restore cursor-forward as spaces BEFORE the general CSI strip removes it.
-    .replace(CURSOR_FORWARD, (_match, count: string) =>
-      " ".repeat(Math.min(80, Math.max(1, Number.parseInt(count || "1", 10)))),
-    )
-    .replace(CSI, "")
-    .replace(ESC_SINGLE, "")
-    // A PTY uses CR to redraw spinner frames in place; treat it as a line break
-    // so a frame can never glue itself to the text that follows.
-    .replace(/\r/g, "\n");
+  const source = raw.replace(OSC8, (_match, uri: string) => `\n${uri}\n`).replace(OSC_OTHER, "");
+
+  let out = "";
+  let column = 0;
+  let i = 0;
+
+  const pad = (count: number) => {
+    const n = Math.min(MAX_PAD_COLUMNS, Math.max(0, count));
+    out += " ".repeat(n);
+    column += n;
+  };
+
+  while (i < source.length) {
+    const char = source[i]!;
+
+    if (char === "\x1b") {
+      const csi = CSI_ONE.exec(source.slice(i));
+      if (csi) {
+        const params = csi[1] ?? "";
+        const final = csi[3];
+        if (final === "G") {
+          const target = Math.max(1, Number.parseInt(params || "1", 10));
+          if (target - 1 > column) pad(target - 1 - column);
+        } else if (final === "C") {
+          pad(Math.max(1, Number.parseInt(params || "1", 10)));
+        }
+        i += csi[0].length;
+        continue;
+      }
+      const single = ESC_SINGLE_ONE.exec(source.slice(i));
+      i += single ? single[0].length : 1;
+      continue;
+    }
+
+    // A PTY redraws in place with CR; treat both as line breaks so a spinner
+    // frame can never glue itself to the text that follows.
+    if (char === "\r" || char === "\n") {
+      out += "\n";
+      column = 0;
+      i += 1;
+      continue;
+    }
+
+    out += char;
+    column += 1;
+    i += 1;
+  }
+
+  return out;
 }
 
 /**
@@ -183,6 +233,17 @@ export function derivePhase(
             "Claude reported success but the token could not be read from its output. " +
             "This usually means the Claude Code output format changed.",
         };
+  }
+
+  const oauthError = text.match(OAUTH_ERROR);
+  if (oauthError) {
+    const detail = (oauthError[1] ?? "").replace(/\s+/g, " ").trim();
+    return {
+      kind: "failed",
+      reason: detail
+        ? `Claude rejected the sign-in — ${detail}. Open the link again and copy the new code.`
+        : "Claude rejected the sign-in. Open the link again and copy the new code.",
+    };
   }
 
   const authorizationUrl = extractAuthorizationUrl(raw, allowedHosts);

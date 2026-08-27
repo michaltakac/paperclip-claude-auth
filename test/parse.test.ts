@@ -57,6 +57,8 @@ const successStream =
  * rejected code. Observed live on 2.1.245.
  */
 const cf = (n: number) => `${ESC}[${n}C`;
+/** Cursor horizontal absolute — how Claude Code actually spaces words. */
+const cha = (n: number) => `${ESC}[${n}G`;
 
 const gluedSuccess = [
   `${ESC}[?25lWelcome${cf(1)}to${cf(1)}Claude${cf(1)}Code${cf(1)}v2.1.245\r\n`,
@@ -89,6 +91,55 @@ describe("cursor-forward word spacing", () => {
 
   it("expands a multi-column cursor-forward", () => {
     expect(renderTerminalText(`a${cf(4)}b`)).toBe("a    b");
+  });
+});
+
+/**
+ * The real mechanism, observed on 2.1.245:
+ *   Welcome\x1b[9Gto\x1b[12GClaude
+ * Cursor-horizontal-absolute, not cursor-forward. Handling only the latter
+ * still rendered `WelcometoClaude`, so every phrase marker missed.
+ */
+describe("cursor-horizontal-absolute word spacing", () => {
+  it("pads out to the target column", () => {
+    expect(renderTerminalText(`Welcome${cha(9)}to${cha(12)}Claude`)).toBe("Welcome to Claude");
+  });
+
+  it("resets the column on a line break", () => {
+    expect(renderTerminalText(`abc\r\n${cha(3)}x`)).toBe("abc\n\n  x");
+  });
+
+  it("never moves backwards", () => {
+    expect(renderTerminalText(`abcdef${cha(2)}g`)).toBe("abcdefg");
+  });
+
+  it("sees the prompt through CHA spacing", () => {
+    const promptCha =
+      link(AUTH_URL) + `\r\n${cha(2)}Paste${cha(8)}code${cha(13)}here${cha(18)}if${cha(21)}prompted${cha(30)}>`;
+    expect(derivePhase(promptCha).kind).toBe("awaiting_code");
+  });
+});
+
+/**
+ * A rejected code is reported explicitly — waiting out the 90s deadline to say
+ * so is both slow and imprecise.
+ */
+describe("explicit rejection", () => {
+  it("reads Claude's OAuth error instead of timing out", () => {
+    const rejected =
+      link(AUTH_URL) +
+      `\r\nPaste code here if prompted >\r\n****\r\n` +
+      `OAuth error: Requ${cha(20)}st failed with${cha(35)}status code 400\r\n Press Enter to retry.`;
+    const phase = derivePhase(rejected);
+    expect(phase.kind).toBe("failed");
+    if (phase.kind === "failed") {
+      expect(phase.reason).toMatch(/Claude rejected the sign-in/);
+      expect(phase.reason).toMatch(/400/);
+    }
+  });
+
+  it("still prefers success when both appear", () => {
+    expect(derivePhase(gluedSuccess).kind).toBe("succeeded");
   });
 });
 

@@ -216,7 +216,10 @@ export function startSetupTokenSession(
           reject(new Error(check.reason));
           return;
         }
-        child.stdin.write(`${code.trim()}\n`, (error) => {
+        // Enter is a CARRIAGE RETURN on a raw-mode terminal. Writing "\n"
+        // types the code but never submits it, so Claude waits in silence
+        // forever — which is exactly how every early attempt failed.
+        child.stdin.write(`${code.trim()}\r`, (error) => {
           if (error) {
             reject(error);
             return;
