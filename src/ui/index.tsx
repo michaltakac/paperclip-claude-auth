@@ -26,8 +26,10 @@ import {
   usePluginToast,
 } from "@paperclipai/plugin-sdk/ui";
 import type { PluginWidgetProps } from "@paperclipai/plugin-sdk/ui";
+import { bindTokenToAgents, describeBindOutcome } from "./agents.js";
 import {
   describeTokenSecret,
+  findTokenSecret,
   storeTokenSecret,
   TOKEN_SECRET_KEY,
   type TokenSecretSummary,
@@ -159,10 +161,24 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         setUi({ view: "storing" });
         try {
           const outcome = await storeTokenSecret(companyId, status.token);
-          const message =
+          const stored =
             outcome.action === "rotated"
               ? `Signed in. ${TOKEN_SECRET_KEY} was updated and is valid for a year.`
               : `Signed in. ${TOKEN_SECRET_KEY} was created and is valid for a year.`;
+
+          // Storing the secret is only half the job — an unbound secret reaches
+          // no agent. Connect them, but never fail the sign-in over it: the
+          // token is safely stored by this point and cannot be minted again.
+          let connected = "";
+          try {
+            connected = describeBindOutcome(await bindTokenToAgents(companyId, outcome.id));
+          } catch (error) {
+            connected =
+              "The token is stored, but connecting it to your agents failed: " +
+              `${error instanceof Error ? error.message : String(error)}. ` +
+              "Add it manually under Secrets → Agent access.";
+          }
+          const message = `${stored} ${connected}`;
           setUi({ view: "done", message });
           void refreshSummary();
           toast({ title: "Claude sign-in complete", body: message, tone: "success" });
@@ -302,6 +318,26 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
     }
   };
 
+  /** Bind an already-stored token to agents, without a fresh sign-in. */
+  const onConnectAgents = async () => {
+    const secret = summary;
+    if (!secret?.present) return;
+    setUi({ view: "storing" });
+    try {
+      const record = await findTokenSecret(companyId);
+      if (!record) throw new Error("The stored token could not be found.");
+      const message = describeBindOutcome(await bindTokenToAgents(companyId, record.id));
+      setUi({ view: "done", message });
+      void refreshSummary();
+      toast({ title: "Agents connected", body: message, tone: "success" });
+    } catch (error) {
+      setUi({
+        view: "error",
+        message: `Could not connect your agents: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  };
+
   const onCancel = async () => {
     try {
       await cancel({ companyId });
@@ -335,6 +371,13 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
               {summary?.present ? "Sign in again" : "Sign in to Claude"}
             </button>
           </div>
+          {summary?.present && summary.bindings === 0 && (
+            <div>
+              <button type="button" onClick={onConnectAgents} style={SECONDARY}>
+                Connect agents to this token
+              </button>
+            </div>
+          )}
           {summary?.present && (
             <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
               Signing in again mints a fresh token and replaces {TOKEN_SECRET_KEY} in place,
