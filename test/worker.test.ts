@@ -46,15 +46,22 @@ function fakeSession(initial: SetupTokenPhase = { kind: "awaiting_code", authori
   };
 }
 
-function setup(initial?: SetupTokenPhase) {
+function setup(initial?: SetupTokenPhase, verdict: { ok: true } | { ok: false; reason: string } = { ok: true }) {
   const fake = fakeSession(initial);
   const harness = createTestHarness({ manifest });
-  const plugin = createClaudeAuthPlugin({ startSession: () => fake.session });
+  const plugin = createClaudeAuthPlugin({
+    startSession: () => fake.session,
+    // Never spawn the real CLI in tests; the live check has its own coverage.
+    verify: async () => verdict,
+  });
   return { harness, plugin, fake };
 }
 
-async function boot(initial?: SetupTokenPhase) {
-  const { harness, plugin, fake } = setup(initial);
+async function boot(
+  initial?: SetupTokenPhase,
+  verdict?: { ok: true } | { ok: false; reason: string },
+) {
+  const { harness, plugin, fake } = setup(initial, verdict);
   await plugin.definition.setup(harness.ctx);
   return { harness, fake };
 }
@@ -124,6 +131,26 @@ describe("a sign-in belongs to the person who started it", () => {
     expect(first.token).toBe(TOKEN);
     expect(second.token).toBeUndefined();
     expect(second.state).toBe("idle");
+  });
+
+  /**
+   * The guard added after a truncated token reached the secret store and eight
+   * agents: a credential that cannot authenticate must never be handed out.
+   */
+  it("withholds a token that fails verification", async () => {
+    const { harness, fake } = await boot(undefined, {
+      ok: false,
+      reason: "The new token was rejected by Claude: 401 OAuth access token is invalid.",
+    });
+    await harness.performAction("start", {}, asUser(ALICE));
+    fake.succeed();
+
+    const result = await harness.performAction<{ state: string; token?: string; reason?: string }>(
+      "poll", {}, asUser(ALICE),
+    );
+    expect(result.state).toBe("failed");
+    expect(result.token).toBeUndefined();
+    expect(result.reason).toMatch(/rejected by Claude/);
   });
 
   it("refuses a code from someone else", async () => {

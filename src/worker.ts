@@ -12,6 +12,7 @@ import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginPerformActionContext } from "@paperclipai/plugin-sdk/protocol";
 import manifest, { ACTIONS } from "./manifest.js";
 import { startSetupTokenSession, type SetupTokenSession } from "./setup-token/session.js";
+import { verifyToken, type VerifyResult } from "./setup-token/verify.js";
 import type { SetupTokenPhase } from "./setup-token/parse.js";
 
 /** The env var the `claude_local` adapter reads. */
@@ -57,7 +58,13 @@ export interface PublicStatus {
  */
 const sessions = new Map<
   string,
-  { session: SetupTokenSession; tokenDelivered: boolean; ownerUserId: string }
+  {
+    session: SetupTokenSession;
+    tokenDelivered: boolean;
+    ownerUserId: string;
+    /** Cached so concurrent polls test the token once, not once each. */
+    verification?: Promise<VerifyResult>;
+  }
 >();
 
 /**
@@ -204,8 +211,11 @@ export type StartSession = typeof startSetupTokenSession;
  * from clean state. Security-relevant state leaking between test cases turns
  * an assertion into a coincidence, so every call resets it.
  */
-export function createClaudeAuthPlugin(deps: { startSession?: StartSession } = {}) {
+export function createClaudeAuthPlugin(
+  deps: { startSession?: StartSession; verify?: typeof verifyToken } = {},
+) {
   const startSession = deps.startSession ?? startSetupTokenSession;
+  const verify = deps.verify ?? verifyToken;
   sessions.clear();
   lastTranscripts.clear();
   cachedConfig = null;
@@ -258,11 +268,31 @@ export function createClaudeAuthPlugin(deps: { startSession?: StartSession } = {
       // One-time delivery. After this reply the worker forgets the token, so a
       // replayed poll cannot hand it out again.
       if (phase.kind === "succeeded" && !entry.tokenDelivered) {
+        // Prove the credential works before anyone stores it. A token
+        // truncated at the terminal wrap passed every other check we had and
+        // only failed once an agent tried to authenticate with it.
+        if (!entry.verification) {
+          const { claudePath } = await resolveConfig(ctx);
+          entry.verification = verify({ claudePath, token: phase.token });
+        }
+        const verdict = await entry.verification;
+
+        if (!verdict.ok) {
+          const failure: SetupTokenPhase = { kind: "failed", reason: verdict.reason };
+          ctx.logger.warn("Minted token failed verification", {
+            companyId,
+            reason: verdict.reason,
+          });
+          remember(companyId, entry, failure);
+          sessions.delete(companyId);
+          return toPublic(failure);
+        }
+
         entry.tokenDelivered = true;
         remember(companyId, entry, phase);
         sessions.delete(companyId);
         ctx.activity
-          .log({ companyId, message: "Claude sign-in completed; token issued to the operator." })
+          .log({ companyId, message: "Claude sign-in completed; token verified and issued." })
           .catch(() => undefined);
         return { ...status, token: phase.token };
       }

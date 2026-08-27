@@ -93,6 +93,19 @@ Forward compatibility is observed, not promised: CT 201 runs the newest host and
 
 Everything the design needs is present in 2026.707.0: `data`, `actions`, `launchers`, `jobs`, `logger` (and `localFolders`, `secrets`, `state`, `activity`, `http`, `tools`, `agents`, `companies`).
 
+## Verifying the minted token
+
+A token is proven to work **before** it is handed to the UI, and a token that fails is never delivered.
+
+This was added because a malformed credential passed everything else. Truncated at the terminal's 80-column wrap, it still looked like a token, satisfied `looksLikeToken`, was accepted by the panel, written to the secret store, and bound to eight agents — failing only at the point of use with `401 OAuth access token is invalid`, two layers from its cause.
+
+**`claude auth status` is not sufficient.** It answers `{"loggedIn": true, "authMethod": "oauth_token"}` for a deliberately bogus token, because it only checks that a token is *present* (verified on 2.1.245). Only a real API round trip separates a working credential from a plausible one, so verification runs one minimal prompt — `claude -p hi --output-format json` — and requires `is_error: false`.
+
+Two details that matter:
+
+- It runs with a **throwaway HOME**. With the real one the CLI could authenticate from an existing credential file and report success for a worthless token — a false green in exactly the case being guarded.
+- It **fails closed**. Unreadable output, an unrecognised shape, or a timeout all count as failure, because storing a credential that could not be confirmed is the mistake this exists to prevent.
+
 ## Security posture
 
 Reviewed externally on 2026-08-28; the findings below were acted on rather than noted.

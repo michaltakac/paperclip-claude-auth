@@ -1,6 +1,6 @@
 {
   "name": "paperclip-claude-auth",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "type": "module",
   "description": "Sign in to Claude from the Paperclip UI. Drives `claude setup-token` on a pseudo-terminal and stores the resulting 1-year token where the claude_local adapter reads it. Works on local environments.",
   "license": "MIT",
