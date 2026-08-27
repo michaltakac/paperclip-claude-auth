@@ -26,7 +26,12 @@ import {
   usePluginToast,
 } from "@paperclipai/plugin-sdk/ui";
 import type { PluginWidgetProps } from "@paperclipai/plugin-sdk/ui";
-import { storeTokenSecret, TOKEN_SECRET_KEY } from "./secrets.js";
+import {
+  describeTokenSecret,
+  storeTokenSecret,
+  TOKEN_SECRET_KEY,
+  type TokenSecretSummary,
+} from "./secrets.js";
 
 type Status = {
   state: "idle" | "starting" | "awaiting_authorization" | "awaiting_code" | "succeeded" | "failed";
@@ -123,6 +128,16 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
   const [elapsed, setElapsed] = useState(0);
   /** What Claude is showing, redacted by the worker. */
   const [transcript, setTranscript] = useState("");
+  /** The stored credential, so the panel can answer "am I signed in?" on load. */
+  const [summary, setSummary] = useState<TokenSecretSummary | null>(null);
+
+  const refreshSummary = useCallback(async () => {
+    try {
+      setSummary(await describeTokenSecret(companyId));
+    } catch {
+      setSummary(null);
+    }
+  }, [companyId]);
   const uiRef = useRef<Ui>(ui);
   uiRef.current = ui;
 
@@ -149,6 +164,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
               ? `Signed in. ${TOKEN_SECRET_KEY} was updated and is valid for a year.`
               : `Signed in. ${TOKEN_SECRET_KEY} was created and is valid for a year.`;
           setUi({ view: "done", message });
+          void refreshSummary();
           toast({ title: "Claude sign-in complete", body: message, tone: "success" });
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
@@ -169,12 +185,13 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
       }
       return false;
     },
-    [companyId, toast],
+    [companyId, toast, refreshSummary],
   );
 
   /** Resume whatever the worker already has, so a refresh is not a dead end. */
   useEffect(() => {
     let cancelled = false;
+    void refreshSummary();
     void (async () => {
       try {
         const status = (await poll({ companyId })) as Status;
@@ -192,7 +209,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [companyId, poll, consume]);
+  }, [companyId, poll, consume, refreshSummary]);
 
   // Poll while something is in flight. Never regresses the view.
   useEffect(() => {
@@ -300,7 +317,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
       <header style={{ display: "grid", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <h3 style={{ margin: 0 }}>Claude sign-in</h3>
-          <StatusBadge {...badgeFor(ui)} />
+          <StatusBadge {...badgeFor(ui, summary)} />
         </div>
         <p style={{ margin: 0, opacity: 0.75 }}>
           Signs your agents in to Claude for a year. You will need the Claude account that
@@ -311,10 +328,19 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
       {ui.view === "loading" && <Spinner size="sm" label="Checking sign-in state" />}
 
       {ui.view === "idle" && (
-        <div>
-          <button type="button" onClick={onStart} style={PRIMARY}>
-            Sign in to Claude
-          </button>
+        <div style={{ display: "grid", gap: 12 }}>
+          <TokenSummary summary={summary} />
+          <div>
+            <button type="button" onClick={onStart} style={PRIMARY}>
+              {summary?.present ? "Sign in again" : "Sign in to Claude"}
+            </button>
+          </div>
+          {summary?.present && (
+            <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
+              Signing in again mints a fresh token and replaces {TOKEN_SECRET_KEY} in place,
+              keeping its history. Your agents keep working throughout.
+            </p>
+          )}
         </div>
       )}
 
@@ -408,6 +434,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
       {ui.view === "done" && (
         <div style={{ display: "grid", gap: 10 }}>
           <p style={{ margin: 0 }}>{ui.message}</p>
+          <TokenSummary summary={summary} />
           <div>
             <button type="button" onClick={() => setUi({ view: "idle" })} style={SECONDARY}>
               Done
@@ -484,19 +511,71 @@ function Step({ n, children }: { n: number; children: React.ReactNode }) {
   );
 }
 
-function badgeFor(ui: Ui): { label: string; status: "ok" | "warning" | "error" | "info" | "pending" } {
-  switch (ui.view) {
-    case "loading":
-      return { label: "Checking", status: "pending" };
-    case "idle":
-      return { label: "Not started", status: "info" };
-    case "done":
-      return { label: "Signed in", status: "ok" };
-    case "error":
-      return { label: "Failed", status: "error" };
-    default:
-      return { label: "In progress", status: "pending" };
+type Badge = { label: string; status: "ok" | "warning" | "error" | "info" | "pending" };
+
+/**
+ * When nothing is in flight the badge describes the *stored credential*, not
+ * the last thing the user did — that is the question someone opening this page
+ * actually has.
+ */
+function badgeFor(ui: Ui, summary: TokenSecretSummary | null): Badge {
+  if (ui.view === "loading") return { label: "Checking", status: "pending" };
+  if (ui.view === "error") return { label: "Failed", status: "error" };
+
+  if (ui.view === "idle" || ui.view === "done") {
+    if (!summary) return { label: "Checking", status: "pending" };
+    if (!summary.present) return { label: "Not signed in", status: "info" };
+    const days = summary.daysLeft;
+    if (typeof days !== "number") return { label: "Signed in", status: "ok" };
+    if (days <= 0) return { label: "Expired", status: "error" };
+    if (days <= 30) return { label: `Expires in ${days}d`, status: "warning" };
+    return { label: "Signed in", status: "ok" };
   }
+
+  return { label: "In progress", status: "pending" };
+}
+
+const DATE_FORMAT: Intl.DateTimeFormatOptions = {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+};
+
+/** The standing answer to "am I signed in, and for how much longer?" */
+function TokenSummary({ summary }: { summary: TokenSecretSummary | null }) {
+  if (!summary) return null;
+
+  if (!summary.present) {
+    return (
+      <p style={{ margin: 0, opacity: 0.8 }}>
+        No Claude token is stored yet. Your agents cannot reach Claude until you sign in.
+      </p>
+    );
+  }
+
+  const expires = summary.expiresAt ? new Date(summary.expiresAt) : null;
+  const signedIn = summary.signedInAt ? new Date(summary.signedInAt) : null;
+  const days = summary.daysLeft;
+  const expired = typeof days === "number" && days <= 0;
+
+  return (
+    <div style={{ display: "grid", gap: 4 }}>
+      <p style={{ margin: 0, fontWeight: 600 }}>
+        {expired
+          ? `${TOKEN_SECRET_KEY} has expired.`
+          : `${TOKEN_SECRET_KEY} is stored and in use.`}
+      </p>
+      <p style={{ margin: 0, opacity: 0.75, fontSize: 13 }}>
+        {signedIn && `Signed in ${signedIn.toLocaleDateString(undefined, DATE_FORMAT)}.`}
+        {expires &&
+          ` ${expired ? "Expired" : "Valid until"} ${expires.toLocaleDateString(undefined, DATE_FORMAT)}`}
+        {typeof days === "number" && !expired && ` — ${days} days left.`}
+        {typeof summary.version === "number" &&
+          summary.version > 1 &&
+          ` Renewed ${summary.version - 1}×.`}
+      </p>
+    </div>
+  );
 }
 
 export default ClaudeAuthSettingsPage;

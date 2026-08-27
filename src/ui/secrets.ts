@@ -23,6 +23,9 @@ interface CompanySecret {
   key?: string | null;
   name?: string | null;
   status?: string | null;
+  latestVersion?: number;
+  lastRotatedAt?: string | null;
+  createdAt?: string | null;
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -91,4 +94,51 @@ export async function storeTokenSecret(
     },
   );
   return { action: "created", id: created.id };
+}
+
+/** `setup-token` mints a one-year credential; Claude says so on start-up. */
+export const TOKEN_LIFETIME_DAYS = 365;
+
+export interface TokenSecretSummary {
+  present: boolean;
+  /** When the credential was last minted — a rotation counts. */
+  signedInAt?: string;
+  expiresAt?: string;
+  daysLeft?: number;
+  /** How many times it has been renewed. 1 means never rotated. */
+  version?: number;
+}
+
+/**
+ * Describe the stored credential so the panel can answer "am I signed in, and
+ * for how much longer" without a sign-in being in progress.
+ *
+ * The expiry is derived, not read: the token's own lifetime is not exposed
+ * anywhere we can query, so it is computed from when we last minted it plus the
+ * documented year. That is why the rotation timestamp matters more than the
+ * creation one.
+ */
+export async function describeTokenSecret(companyId: string): Promise<TokenSecretSummary> {
+  const secret = await findTokenSecret(companyId);
+  if (!secret) return { present: false };
+
+  const mintedAt = secret.lastRotatedAt ?? secret.createdAt;
+  if (!mintedAt) return { present: true, version: secret.latestVersion };
+
+  const signedInAt = new Date(mintedAt);
+  if (Number.isNaN(signedInAt.getTime())) {
+    return { present: true, version: secret.latestVersion };
+  }
+
+  const expiresAt = new Date(signedInAt);
+  expiresAt.setDate(expiresAt.getDate() + TOKEN_LIFETIME_DAYS);
+  const daysLeft = Math.round((expiresAt.getTime() - Date.now()) / 86_400_000);
+
+  return {
+    present: true,
+    signedInAt: signedInAt.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    daysLeft,
+    version: secret.latestVersion,
+  };
 }
