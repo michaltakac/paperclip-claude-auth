@@ -29,6 +29,15 @@ export interface PublicStatus {
   token?: string;
   /** The key the UI should bind the token to. */
   secretKey?: string;
+  /**
+   * What Claude is showing, redacted.
+   *
+   * Safe to display: `redactForLogs` removes the token and every OAuth query
+   * value, and the submitted code is masked by Claude itself. Sending it on
+   * every poll is what turns an opaque wait into something a user can read —
+   * and what makes a failure diagnosable without a console.
+   */
+  transcript?: string;
 }
 
 /** One live sign-in per company. A second start replaces the first. */
@@ -166,7 +175,10 @@ const plugin = definePlugin({
       if (!entry) return { state: "idle" } satisfies PublicStatus;
 
       const phase = entry.session.phase();
-      const status = toPublic(phase);
+      const status: PublicStatus = {
+        ...toPublic(phase),
+        transcript: entry.session.transcript(),
+      };
 
       // One-time delivery. After this reply the worker forgets the token, so a
       // replayed poll cannot hand it out again.

@@ -33,6 +33,7 @@ type Status = {
   authorizationUrl?: string;
   reason?: string;
   token?: string;
+  transcript?: string;
 };
 
 type Ui =
@@ -120,6 +121,8 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
 
   const [ui, setUi] = useState<Ui>({ view: "loading" });
   const [elapsed, setElapsed] = useState(0);
+  /** What Claude is showing, redacted by the worker. */
+  const [transcript, setTranscript] = useState("");
   const uiRef = useRef<Ui>(ui);
   uiRef.current = ui;
 
@@ -203,6 +206,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
       try {
         const status = (await poll({ companyId })) as Status;
         if (cancelled) return;
+        if (status.transcript) setTranscript(status.transcript);
         if (await consume(status)) return;
 
         // Only ever move forward. While verifying, `awaiting_code` is the
@@ -391,6 +395,9 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         </div>
       )}
 
+      {(ui.view === "verifying" || ui.view === "error" || ui.view === "authorize") &&
+        transcript.trim() && <ClaudeOutput text={transcript} />}
+
       {ui.view === "storing" && (
         <Row>
           <Spinner size="sm" label="Storing token" />
@@ -422,6 +429,45 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * What Claude is showing, verbatim.
+ *
+ * Claude answers a bad code with silence, so without this the user stares at a
+ * spinner with no idea whether anything is happening. The text is redacted by
+ * the worker — no token, no PKCE query — and the submitted code is masked by
+ * Claude itself.
+ */
+function ClaudeOutput({ text }: { text: string }) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line, index, all) => line !== "" || all[index - 1] !== "");
+  return (
+    <details open style={{ borderTop: "1px solid var(--border, #3f3f46)", paddingTop: 12 }}>
+      <summary style={{ cursor: "pointer", opacity: 0.8, marginBottom: 8 }}>
+        What Claude is showing
+      </summary>
+      <pre
+        style={{
+          margin: 0,
+          padding: 12,
+          maxHeight: 240,
+          overflow: "auto",
+          borderRadius: 8,
+          background: "var(--muted, rgba(255,255,255,0.04))",
+          border: "1px solid var(--border, #3f3f46)",
+          fontSize: 12,
+          lineHeight: 1.5,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+        }}
+      >
+        {lines.join("\n")}
+      </pre>
+    </details>
   );
 }
 
