@@ -14,6 +14,7 @@ export const ACTIONS = {
   poll: "poll",
   submitCode: "submit-code",
   cancel: "cancel",
+  diagnostics: "diagnostics",
 } as const;
 
 /**

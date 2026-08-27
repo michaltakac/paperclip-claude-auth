@@ -34,6 +34,24 @@ export interface PublicStatus {
 /** One live sign-in per company. A second start replaces the first. */
 const sessions = new Map<string, { session: SetupTokenSession; tokenDelivered: boolean }>();
 
+/**
+ * The redacted transcript of the last finished sign-in, kept per company.
+ *
+ * A failed sign-in is otherwise undebuggable: the process is gone, the PTY
+ * output went nowhere, and "Claude did not accept that code" is indistinguishable
+ * from "we failed to recognise that Claude accepted it". The transcript is passed
+ * through `redactForLogs`, so it carries neither the token nor the PKCE query.
+ */
+const lastTranscripts = new Map<string, { phase: string; transcript: string; at: string }>();
+
+function remember(companyId: string, entry: { session: SetupTokenSession }, phase: SetupTokenPhase): void {
+  lastTranscripts.set(companyId, {
+    phase: phase.kind === "failed" ? `failed: ${phase.reason}` : phase.kind,
+    transcript: entry.session.transcript(),
+    at: new Date().toISOString(),
+  });
+}
+
 function toPublic(phase: SetupTokenPhase): PublicStatus {
   switch (phase.kind) {
     case "starting":
@@ -154,6 +172,7 @@ const plugin = definePlugin({
       // replayed poll cannot hand it out again.
       if (phase.kind === "succeeded" && !entry.tokenDelivered) {
         entry.tokenDelivered = true;
+        remember(companyId, entry, phase);
         sessions.delete(companyId);
         ctx.activity
           .log({ companyId, message: "Claude sign-in completed; token issued to the operator." })
@@ -161,6 +180,7 @@ const plugin = definePlugin({
         return { ...status, token: phase.token };
       }
       if (phase.kind === "succeeded" || phase.kind === "failed") {
+        remember(companyId, entry, phase);
         sessions.delete(companyId);
       }
       return status;
@@ -185,6 +205,19 @@ const plugin = definePlugin({
       sessions.get(companyId)?.session.cancel();
       sessions.delete(companyId);
       return { state: "idle" } satisfies PublicStatus;
+    });
+
+    // Read the last finished sign-in's redacted transcript. This is the only
+    // way to tell a rejected code from output we failed to parse.
+    ctx.actions.register(ACTIONS.diagnostics, async (input) => {
+      const companyId = requireCompanyId(input);
+      return (
+        lastTranscripts.get(companyId) ?? {
+          phase: "none",
+          transcript: "",
+          at: "",
+        }
+      );
     });
 
     ctx.data.register(ACTIONS.status, async (input) => {

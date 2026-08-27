@@ -210,6 +210,18 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         const current = uiRef.current;
         if (current.view === "starting" && status.authorizationUrl) {
           setUi({ view: "authorize", url: status.authorizationUrl, code: "" });
+          return;
+        }
+        // The worker reports `idle` once a finished session is cleaned up. If
+        // that happens while we are waiting, the outcome was consumed by
+        // another poll and we would otherwise spin forever on a dead session.
+        if (status.state === "idle" && current.view === "verifying") {
+          setUi({
+            view: "error",
+            message:
+              "The sign-in ended without reporting a result. Run the diagnostics action to see " +
+              "what Claude printed, then start again.",
+          });
         }
       } catch {
         /* transient; the next tick retries */
