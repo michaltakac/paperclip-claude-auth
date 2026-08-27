@@ -10,7 +10,7 @@
 
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginPerformActionContext } from "@paperclipai/plugin-sdk/protocol";
-import { ACTIONS } from "./manifest.js";
+import manifest, { ACTIONS } from "./manifest.js";
 import { startSetupTokenSession, type SetupTokenSession } from "./setup-token/session.js";
 import type { SetupTokenPhase } from "./setup-token/parse.js";
 
@@ -319,7 +319,11 @@ export function createClaudeAuthPlugin(deps: { startSession?: StartSession } = {
 
     // Nothing company-scoped may be touched here: worker init has no company
     // context, and anything that needs one fails initialization outright.
-    ctx.logger.info("Claude sign-in plugin ready");
+    //
+    // The version is logged because a rebuilt bundle does NOT reload until the
+    // plugin is disabled and re-enabled. A fix sitting on disk while the old
+    // worker keeps running cost a debugging round trip and a second bad token.
+    ctx.logger.info(`Claude sign-in plugin ready (v${manifest.version})`);
   },
 
   async onShutdown() {
