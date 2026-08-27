@@ -24,6 +24,38 @@ import {
   type SetupTokenPhase,
 } from "./parse.js";
 
+/**
+ * Environment passed to the child.
+ *
+ * The worker's own environment holds whatever the Paperclip runtime was given —
+ * DATABASE_URL, provider keys, internal tokens. None of that is any business of
+ * a login subprocess, so the child gets an allowlist rather than a copy.
+ */
+const INHERITED_ENV_KEYS = [
+  "PATH",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+] as const;
+
+/**
+ * Cap on retained PTY output.
+ *
+ * The stream is attacker-influenced in the sense that a misbehaving or replaced
+ * executable controls its volume, and the buffer was previously unbounded and
+ * fully re-parsed on every chunk. Head and tail are both kept: the head carries
+ * the authorization URL, the tail carries the prompt and the success block.
+ */
+const MAX_HEAD_BYTES = 32 * 1024;
+const MAX_TAIL_BYTES = 32 * 1024;
+
 /** Bracketed paste markers — Claude's TUI turns this mode on (ESC[?2004h). */
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
@@ -116,8 +148,30 @@ export function startSetupTokenSession(
   } = options;
 
   assertSafeExecutablePath(claudePath);
+  assertSafeExecutablePath(scriptPath);
 
-  let raw = "";
+  let head = "";
+  let tail = "";
+  let truncated = false;
+  /** The submitted code, retained solely so it can be redacted out again. */
+  let submittedCode: string | null = null;
+
+  const raw = () =>
+    truncated ? `${head}\n[... output truncated ...]\n${tail}` : head + tail;
+
+  const append = (chunk: string) => {
+    if (head.length < MAX_HEAD_BYTES) {
+      const room = MAX_HEAD_BYTES - head.length;
+      head += chunk.slice(0, room);
+      chunk = chunk.slice(room);
+      if (!chunk) return;
+    }
+    tail += chunk;
+    if (tail.length > MAX_TAIL_BYTES) {
+      tail = tail.slice(tail.length - MAX_TAIL_BYTES);
+      truncated = true;
+    }
+  };
   let phase: SetupTokenPhase = { kind: "starting" };
   let settled = false;
   let codeDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -126,13 +180,17 @@ export function startSetupTokenSession(
     resolveDone = resolve;
   });
 
+  const childEnv: Record<string, string> = { HOME: home };
+  for (const key of INHERITED_ENV_KEYS) {
+    const value = process.env[key];
+    if (typeof value === "string") childEnv[key] = value;
+  }
+  Object.assign(childEnv, env, { HOME: home });
+
   const child: ChildProcessWithoutNullStreams = spawn(
     scriptPath,
     ["-qec", `${claudePath} setup-token`, "/dev/null"],
-    {
-      env: { ...process.env, ...env, HOME: home },
-      stdio: ["pipe", "pipe", "pipe"],
-    },
+    { env: childEnv, stdio: ["pipe", "pipe", "pipe"] },
   );
 
   const sessionTimer = setTimeout(
@@ -171,8 +229,8 @@ export function startSetupTokenSession(
 
   function ingest(chunk: Buffer): void {
     if (settled) return;
-    raw += chunk.toString("utf8");
-    const next = derivePhase(raw, allowedHosts);
+    append(chunk.toString("utf8"));
+    const next = derivePhase(raw(), allowedHosts);
     if (next.kind === phase.kind && !isTerminal(next)) return;
     phase = next;
     onPhase?.(next);
@@ -197,7 +255,13 @@ export function startSetupTokenSession(
 
   return {
     phase: () => phase,
-    transcript: () => redactForLogs(raw),
+    // The code is masked by Claude today, but that is its behaviour, not our
+    // guarantee — redact it ourselves so a future CLI that echoes it plainly
+    // cannot leak it through polling or diagnostics.
+    transcript: () => {
+      const text = redactForLogs(raw());
+      return submittedCode ? text.split(submittedCode).join("<REDACTED_CODE>") : text;
+    },
     done: () => donePromise,
     cancel: (reason = "The sign-in was cancelled.") => settle({ kind: "failed", reason }),
     submitCode: (code: string) =>
@@ -237,7 +301,8 @@ export function startSetupTokenSession(
         //  - Claude's TUI enables bracketed paste (ESC[?2004h), so the code is
         //    framed as a paste and handled atomically instead of as 92
         //    individual keystrokes.
-        const payload = `${PASTE_START}${code.trim()}${PASTE_END}`;
+        submittedCode = code.trim();
+        const payload = `${PASTE_START}${submittedCode}${PASTE_END}`;
         child.stdin.write(payload, (error) => {
           if (error) {
             reject(error);

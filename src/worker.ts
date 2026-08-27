@@ -9,6 +9,7 @@
  */
 
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
+import type { PluginPerformActionContext } from "@paperclipai/plugin-sdk/protocol";
 import { ACTIONS } from "./manifest.js";
 import { startSetupTokenSession, type SetupTokenSession } from "./setup-token/session.js";
 import type { SetupTokenPhase } from "./setup-token/parse.js";
@@ -40,8 +41,17 @@ export interface PublicStatus {
   transcript?: string;
 }
 
-/** One live sign-in per company. A second start replaces the first. */
-const sessions = new Map<string, { session: SetupTokenSession; tokenDelivered: boolean }>();
+/**
+ * One live sign-in per company, owned by the user who started it.
+ *
+ * Ownership is not decoration. Whoever polls first receives the one-year token,
+ * so without it any principal able to reach this company's plugin actions could
+ * replace, drive, or harvest someone else's sign-in.
+ */
+const sessions = new Map<
+  string,
+  { session: SetupTokenSession; tokenDelivered: boolean; ownerUserId: string }
+>();
 
 /**
  * The redacted transcript of the last finished sign-in, kept per company.
@@ -51,13 +61,25 @@ const sessions = new Map<string, { session: SetupTokenSession; tokenDelivered: b
  * from "we failed to recognise that Claude accepted it". The transcript is passed
  * through `redactForLogs`, so it carries neither the token nor the PKCE query.
  */
-const lastTranscripts = new Map<string, { phase: string; transcript: string; at: string }>();
+const lastTranscripts = new Map<
+  string,
+  { phase: string; transcript: string; at: string; ownerUserId: string; expiresAt: number }
+>();
 
-function remember(companyId: string, entry: { session: SetupTokenSession }, phase: SetupTokenPhase): void {
+/** Diagnostics are for the run you just did, not an archive. */
+const TRANSCRIPT_TTL_MS = 30 * 60 * 1000;
+
+function remember(
+  companyId: string,
+  entry: { session: SetupTokenSession; ownerUserId: string },
+  phase: SetupTokenPhase,
+): void {
   lastTranscripts.set(companyId, {
     phase: phase.kind === "failed" ? `failed: ${phase.reason}` : phase.kind,
     transcript: entry.session.transcript(),
     at: new Date().toISOString(),
+    ownerUserId: entry.ownerUserId,
+    expiresAt: Date.now() + TRANSCRIPT_TTL_MS,
   });
 }
 
@@ -76,12 +98,36 @@ function toPublic(phase: SetupTokenPhase): PublicStatus {
   }
 }
 
-function requireCompanyId(input: unknown): string {
-  const companyId = (input as { companyId?: unknown } | undefined)?.companyId;
-  if (typeof companyId !== "string" || !companyId) {
-    throw new Error("companyId is required.");
+/**
+ * Resolve who is calling, from the host — never from the caller's parameters.
+ *
+ * The SDK supplies an immutable, host-authenticated actor context precisely so
+ * a plugin does not have to trust its input. Minting a Claude subscription
+ * credential is a human action: an agent principal is refused outright, since
+ * an agent that could drive this flow could harvest the token it produces.
+ */
+function requireActor(context: PluginPerformActionContext): {
+  companyId: string;
+  userId: string;
+} {
+  const companyId = context.companyId ?? context.actor.companyId;
+  if (!companyId) {
+    throw new Error("This action must be performed in the context of a company.");
   }
-  return companyId;
+  if (context.actor.type !== "user" || !context.actor.userId) {
+    throw new Error("Only a signed-in person can manage the Claude sign-in.");
+  }
+  return { companyId, userId: context.actor.userId };
+}
+
+/** The session for this company, if the caller is the one who started it. */
+function ownedSession(companyId: string, userId: string) {
+  const entry = sessions.get(companyId);
+  if (!entry) return null;
+  if (entry.ownerUserId !== userId) {
+    throw new Error("Another person is signing in to Claude right now. Try again shortly.");
+  }
+  return entry;
 }
 
 interface ResolvedConfig {
@@ -143,11 +189,17 @@ async function resolveConfig(ctx: {
 
 const plugin = definePlugin({
   async setup(ctx) {
-    ctx.actions.register(ACTIONS.start, async (input) => {
-      const companyId = requireCompanyId(input);
+    ctx.actions.register(ACTIONS.start, async (_input, context) => {
+      const { companyId, userId } = requireActor(context);
 
-      // Replace any earlier attempt rather than leaving a second PTY alive.
-      sessions.get(companyId)?.session.cancel("Replaced by a new sign-in.");
+      // Replace only your own attempt. Someone else's live sign-in is not
+      // yours to cancel, and cancelling it would let a second principal
+      // displace a flow whose token they could then collect.
+      const existing = sessions.get(companyId);
+      if (existing && existing.ownerUserId !== userId) {
+        throw new Error("Another person is signing in to Claude right now. Try again shortly.");
+      }
+      existing?.session.cancel("Replaced by a new sign-in.");
 
       const { claudePath, scriptPath, claudeHome } = await resolveConfig(ctx);
       const session = startSetupTokenSession({
@@ -160,7 +212,7 @@ const plugin = definePlugin({
           }
         },
       });
-      sessions.set(companyId, { session, tokenDelivered: false });
+      sessions.set(companyId, { session, tokenDelivered: false, ownerUserId: userId });
 
       ctx.activity
         .log({ companyId, message: "Claude sign-in started." })
@@ -169,9 +221,9 @@ const plugin = definePlugin({
       return toPublic(session.phase());
     });
 
-    ctx.actions.register(ACTIONS.poll, async (input) => {
-      const companyId = requireCompanyId(input);
-      const entry = sessions.get(companyId);
+    ctx.actions.register(ACTIONS.poll, async (_input, context) => {
+      const { companyId, userId } = requireActor(context);
+      const entry = ownedSession(companyId, userId);
       if (!entry) return { state: "idle" } satisfies PublicStatus;
 
       const phase = entry.session.phase();
@@ -198,12 +250,12 @@ const plugin = definePlugin({
       return status;
     });
 
-    ctx.actions.register(ACTIONS.submitCode, async (input) => {
-      const companyId = requireCompanyId(input);
+    ctx.actions.register(ACTIONS.submitCode, async (input, context) => {
+      const { companyId, userId } = requireActor(context);
       const code = (input as { code?: unknown }).code;
       if (typeof code !== "string") throw new Error("A code is required.");
 
-      const entry = sessions.get(companyId);
+      const entry = ownedSession(companyId, userId);
       if (!entry) throw new Error("There is no sign-in in progress. Start one first.");
 
       // Throws with a user-facing reason when the code belongs to another
@@ -212,36 +264,34 @@ const plugin = definePlugin({
       return toPublic(entry.session.phase());
     });
 
-    ctx.actions.register(ACTIONS.cancel, async (input) => {
-      const companyId = requireCompanyId(input);
-      sessions.get(companyId)?.session.cancel();
-      sessions.delete(companyId);
+    ctx.actions.register(ACTIONS.cancel, async (_input, context) => {
+      const { companyId, userId } = requireActor(context);
+      const entry = ownedSession(companyId, userId);
+      entry?.session.cancel();
+      if (entry) sessions.delete(companyId);
       return { state: "idle" } satisfies PublicStatus;
     });
 
     // Read the last finished sign-in's redacted transcript. This is the only
     // way to tell a rejected code from output we failed to parse.
-    ctx.actions.register(ACTIONS.diagnostics, async (input) => {
-      const companyId = requireCompanyId(input);
-      return (
-        lastTranscripts.get(companyId) ?? {
-          phase: "none",
-          transcript: "",
-          at: "",
-        }
-      );
+    ctx.actions.register(ACTIONS.diagnostics, async (_input, context) => {
+      const { companyId, userId } = requireActor(context);
+      const empty = { phase: "none", transcript: "", at: "" };
+      const record = lastTranscripts.get(companyId);
+      if (!record) return empty;
+      // Expired, or someone else's run — a transcript is a record of one
+      // person's sign-in, not a company-wide log.
+      if (record.expiresAt < Date.now()) {
+        lastTranscripts.delete(companyId);
+        return empty;
+      }
+      if (record.ownerUserId !== userId) return empty;
+      return { phase: record.phase, transcript: record.transcript, at: record.at };
     });
 
-    ctx.data.register(ACTIONS.status, async (input) => {
-      const companyId = requireCompanyId(input);
-      const entry = sessions.get(companyId);
+    ctx.data.register(ACTIONS.status, async () => {
       const { claudePath, claudeHome } = await resolveConfig(ctx);
-      return {
-        secretKey: TOKEN_SECRET_KEY,
-        signInInProgress: Boolean(entry),
-        claudePath,
-        claudeHome,
-      };
+      return { secretKey: TOKEN_SECRET_KEY, claudePath, claudeHome };
     });
 
     // Nothing company-scoped may be touched here: worker init has no company
