@@ -46,6 +46,55 @@ type Ui =
   | { view: "done"; message: string }
   | { view: "error"; message: string };
 
+/**
+ * The host applies an aggressive CSS reset to plugin UI, so bare <a>, <button>
+ * and <input> render as unstyled text — a link is indistinguishable from a
+ * sentence and two buttons read as one run-on line. Every control here is
+ * styled explicitly. Colours come from host CSS variables where they exist so
+ * the panel follows the active theme, with fallbacks for when they do not.
+ */
+const CONTROL: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+  padding: "10px 16px",
+  borderRadius: 8,
+  fontSize: 14,
+  fontWeight: 600,
+  lineHeight: 1.2,
+  cursor: "pointer",
+  textDecoration: "none",
+  border: "1px solid transparent",
+  fontFamily: "inherit",
+};
+
+const PRIMARY: React.CSSProperties = {
+  ...CONTROL,
+  background: "var(--primary, #6366f1)",
+  color: "var(--primary-foreground, #ffffff)",
+};
+
+const SECONDARY: React.CSSProperties = {
+  ...CONTROL,
+  background: "transparent",
+  color: "inherit",
+  borderColor: "var(--border, #3f3f46)",
+};
+
+const DISABLED: React.CSSProperties = { opacity: 0.5, cursor: "not-allowed" };
+
+const INPUT: React.CSSProperties = {
+  padding: "10px 12px",
+  width: "100%",
+  borderRadius: 8,
+  border: "1px solid var(--border, #3f3f46)",
+  background: "var(--input, rgba(255,255,255,0.04))",
+  color: "inherit",
+  fontSize: 14,
+  fontFamily: "inherit",
+};
+
 const POLL_INTERVAL_MS = 1200;
 
 /** Mirrors DEFAULT_CODE_ACCEPTANCE_TIMEOUT_MS in the worker. */
@@ -247,7 +296,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
 
       {ui.view === "idle" && (
         <div>
-          <button type="button" onClick={onStart}>
+          <button type="button" onClick={onStart} style={PRIMARY}>
             Sign in to Claude
           </button>
         </div>
@@ -263,13 +312,9 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
       {(ui.view === "authorize" || ui.view === "submitting") && (
         <div style={{ display: "grid", gap: 14 }}>
           <Step n={1}>
-            <a
-              href={ui.url}
-              target="_blank"
-              rel="noreferrer noopener"
-              style={{ fontWeight: 600 }}
-            >
-              Open Claude and approve the sign-in ↗
+            <a href={ui.url} target="_blank" rel="noreferrer noopener" style={PRIMARY}>
+              Open Claude and approve the sign-in
+              <span aria-hidden="true">↗</span>
             </a>
           </Step>
           <Step n={2}>Copy the code Claude shows you and paste it here.</Step>
@@ -286,7 +331,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void onSubmit();
                 }}
-                style={{ padding: "8px 10px", width: "100%" }}
+                style={INPUT}
               />
               {ui.error && (
                 <p role="alert" style={{ margin: 0, color: "var(--destructive, #f87171)" }}>
@@ -294,10 +339,15 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
                 </p>
               )}
               <Row>
-                <button type="button" onClick={onSubmit} disabled={!ui.code.trim()}>
+                <button
+                  type="button"
+                  onClick={onSubmit}
+                  disabled={!ui.code.trim()}
+                  style={ui.code.trim() ? PRIMARY : { ...PRIMARY, ...DISABLED }}
+                >
                   Finish sign-in
                 </button>
-                <button type="button" onClick={onCancel}>
+                <button type="button" onClick={onCancel} style={SECONDARY}>
                   Cancel
                 </button>
               </Row>
@@ -322,7 +372,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
             in {remaining}s if nothing comes back.
           </p>
           <div>
-            <button type="button" onClick={onCancel}>
+            <button type="button" onClick={onCancel} style={SECONDARY}>
               Cancel
             </button>
           </div>
@@ -340,7 +390,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         <div style={{ display: "grid", gap: 10 }}>
           <p style={{ margin: 0 }}>{ui.message}</p>
           <div>
-            <button type="button" onClick={() => setUi({ view: "idle" })}>
+            <button type="button" onClick={() => setUi({ view: "idle" })} style={SECONDARY}>
               Done
             </button>
           </div>
@@ -353,7 +403,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
             {ui.message}
           </p>
           <div>
-            <button type="button" onClick={onStart}>
+            <button type="button" onClick={onStart} style={PRIMARY}>
               Start again
             </button>
           </div>
