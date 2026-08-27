@@ -574,6 +574,13 @@ function TokenSummary({ summary }: { summary: TokenSecretSummary | null }) {
           summary.version > 1 &&
           ` Renewed ${summary.version - 1}×.`}
       </p>
+      {summary.bindings === 0 && (
+        <p style={{ margin: "4px 0 0", color: "var(--warning, #fbbf24)", fontSize: 13 }}>
+          Not yet bound to any agent. The token is stored, but no agent receives it until
+          it is added under Secrets → this secret → Agent access, as the environment
+          variable {TOKEN_SECRET_KEY}.
+        </p>
+      )}
     </div>
   );
 }

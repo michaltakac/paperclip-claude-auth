@@ -26,6 +26,19 @@ interface CompanySecret {
   latestVersion?: number;
   lastRotatedAt?: string | null;
   createdAt?: string | null;
+  /** How many agent env bindings reference this secret. */
+  referenceCount?: number;
+}
+
+/**
+ * Paperclip normalizes a secret key on write: `CLAUDE_CODE_OAUTH_TOKEN` is
+ * stored as `claude_code_oauth_token`. Comparing the literal env-var spelling
+ * therefore never matched an existing secret — the panel reported "no token
+ * stored" while looking straight at one, and a renewal would have created a
+ * duplicate instead of rotating the original.
+ */
+function normalizeKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -53,8 +66,12 @@ export async function findTokenSecret(companyId: string): Promise<CompanySecret 
   const secrets = await request<CompanySecret[]>(
     `/api/companies/${encodeURIComponent(companyId)}/secrets`,
   );
+  const wanted = normalizeKey(TOKEN_SECRET_KEY);
   const match = secrets.find(
-    (secret) => secret.key === TOKEN_SECRET_KEY && secret.status !== "deleted",
+    (secret) =>
+      typeof secret.key === "string" &&
+      normalizeKey(secret.key) === wanted &&
+      secret.status !== "deleted",
   );
   return match ?? null;
 }
@@ -101,6 +118,12 @@ export const TOKEN_LIFETIME_DAYS = 365;
 
 export interface TokenSecretSummary {
   present: boolean;
+  /**
+   * Agent env bindings referencing this secret. Zero means the token is stored
+   * but reaches no agent — worth saying out loud, because "the secret exists"
+   * and "the agents can use it" are not the same thing.
+   */
+  bindings?: number;
   /** When the credential was last minted — a rotation counts. */
   signedInAt?: string;
   expiresAt?: string;
@@ -122,12 +145,13 @@ export async function describeTokenSecret(companyId: string): Promise<TokenSecre
   const secret = await findTokenSecret(companyId);
   if (!secret) return { present: false };
 
+  const bindings = secret.referenceCount;
   const mintedAt = secret.lastRotatedAt ?? secret.createdAt;
-  if (!mintedAt) return { present: true, version: secret.latestVersion };
+  if (!mintedAt) return { present: true, version: secret.latestVersion, bindings };
 
   const signedInAt = new Date(mintedAt);
   if (Number.isNaN(signedInAt.getTime())) {
-    return { present: true, version: secret.latestVersion };
+    return { present: true, version: secret.latestVersion, bindings };
   }
 
   const expiresAt = new Date(signedInAt);
@@ -140,5 +164,6 @@ export async function describeTokenSecret(companyId: string): Promise<TokenSecre
     expiresAt: expiresAt.toISOString(),
     daysLeft,
     version: secret.latestVersion,
+    bindings,
   };
 }
