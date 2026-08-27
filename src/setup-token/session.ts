@@ -24,11 +24,21 @@ import {
   type SetupTokenPhase,
 } from "./parse.js";
 
+/** Bracketed paste markers — Claude's TUI turns this mode on (ESC[?2004h). */
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+
 /** Default ceiling for a whole login. A human has to visit a browser in this window. */
 export const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Give up if Claude emits nothing at all for this long — it never reached the prompt. */
 export const DEFAULT_STARTUP_TIMEOUT_MS = 60 * 1000;
+
+/** Delay between delivering the paste and pressing Enter. */
+const ENTER_DELAY_MS = 200;
+
+/** If Claude has not reacted by now, press Enter once more. */
+const ENTER_RETRY_MS = 8000;
 
 /**
  * How long to wait for a submitted code to be accepted.
@@ -216,14 +226,35 @@ export function startSetupTokenSession(
           reject(new Error(check.reason));
           return;
         }
-        // Enter is a CARRIAGE RETURN on a raw-mode terminal. Writing "\n"
-        // types the code but never submits it, so Claude waits in silence
-        // forever — which is exactly how every early attempt failed.
-        child.stdin.write(`${code.trim()}\r`, (error) => {
+        // How a code has to be delivered, established by probing the real CLI:
+        //
+        //  - Enter is a CARRIAGE RETURN. Writing "\n" types the code but never
+        //    submits it, so Claude waits in silence forever.
+        //  - The CR must be a SEPARATE write. A code long enough to wrap onto a
+        //    second line swallows a CR sent in the same chunk during the
+        //    re-render — a 28-character code submitted fine, a 92-character one
+        //    did nothing until a second Enter arrived.
+        //  - Claude's TUI enables bracketed paste (ESC[?2004h), so the code is
+        //    framed as a paste and handled atomically instead of as 92
+        //    individual keystrokes.
+        const payload = `${PASTE_START}${code.trim()}${PASTE_END}`;
+        child.stdin.write(payload, (error) => {
           if (error) {
             reject(error);
             return;
           }
+          // Press Enter separately, once the paste has been absorbed.
+          setTimeout(() => {
+            if (!settled) child.stdin.write("\r");
+          }, ENTER_DELAY_MS).unref?.();
+
+          // Belt and braces: if nothing has moved, press Enter once more. A
+          // second CR is what unstuck a wrapped paste in testing, and a
+          // duplicate Enter on an already-submitted code is harmless.
+          setTimeout(() => {
+            if (!settled && phase.kind === "awaiting_code") child.stdin.write("\r");
+          }, ENTER_RETRY_MS).unref?.();
+
           // Silence is the only signal a code was rejected server-side, so the
           // wait has to be bounded or the UI hangs forever.
           codeDeadline = setTimeout(
