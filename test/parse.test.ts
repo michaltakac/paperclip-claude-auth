@@ -229,6 +229,30 @@ describe("extractToken across a terminal wrap", () => {
   });
 });
 
+/**
+ * Banner wording differs between Claude Code versions — 2.1.245 prints a
+ * "long-lived (1-year)" intro that 2.1.207 does not — so success is decided by
+ * whether a credential can be read, not by the prose above it.
+ */
+describe("success detection across banner wording", () => {
+  const TOKEN_ONLY =
+    "Your OAuth token (valid for 1 year):\r\n\r\n" +
+    "sk-ant-oat01-NOBANNERTOKEN01234567890\r\n\r\n" +
+    "Store this token securely.\r\n";
+
+  it("succeeds with no success banner at all", () => {
+    expect(derivePhase(TOKEN_ONLY)).toEqual({
+      kind: "succeeded",
+      token: "sk-ant-oat01-NOBANNERTOKEN01234567890",
+    });
+  });
+
+  it("still fails loudly when a banner claims success but no token is readable", () => {
+    const broken = "✓ Long-lived authentication token created successfully!\r\n";
+    expect(derivePhase(broken).kind).toBe("failed");
+  });
+});
+
 describe("extractToken", () => {
   it("reads the token that follows the heading", () => {
     expect(extractToken(successStream)).toBe("sk-ant-oat01-EXAMPLETOKENVALUE0123456789");

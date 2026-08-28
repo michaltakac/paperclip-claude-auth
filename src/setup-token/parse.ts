@@ -243,16 +243,22 @@ export function derivePhase(
 ): SetupTokenPhase {
   const text = renderTerminalText(raw);
 
+  // Success is decided by whether a credential can actually be read, not by the
+  // banner above it. Banner wording varies between Claude Code versions —
+  // 2.1.245 prints a "long-lived (1-year)" intro that 2.1.207 does not — and
+  // keying success off prose would make this brittle across upgrades. The
+  // token's own shape is checked by `extractToken`, and the worker proves it
+  // against the real API before anything stores it.
+  const token = extractToken(raw);
+  if (token) return { kind: "succeeded", token };
+
   if (SUCCESS_MARKER.test(text)) {
-    const token = extractToken(raw);
-    return token
-      ? { kind: "succeeded", token }
-      : {
-          kind: "failed",
-          reason:
-            "Claude reported success but the token could not be read from its output. " +
-            "This usually means the Claude Code output format changed.",
-        };
+    return {
+      kind: "failed",
+      reason:
+        "Claude reported success but the token could not be read from its output. " +
+        "This usually means the Claude Code output format changed.",
+    };
   }
 
   const oauthError = text.match(OAUTH_ERROR);
