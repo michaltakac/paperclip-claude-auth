@@ -36,6 +36,27 @@ A `setup-token` credential is good for **a year** instead of ~46 days, and this 
 
 The user never sees terminal output. That is the point.
 
+## Updating
+
+The panel shows the installed version and offers an **Update** button.
+
+Paperclip has no plugin-update UI. The host implements upgrade fully:
+`POST /api/plugins/:id/upgrade` deactivates the runtime, downloads and validates the new
+package, compares the manifest capabilities, and then either reactivates the plugin or
+holds it in `upgrade_pending` for an administrator. Nothing in the product calls it, so
+this panel does.
+
+- The upgrade runs as the signed-in person, from plugin UI on the same origin as
+  Paperclip, and needs instance-admin rights. It is deliberately **not** done from the
+  worker: a worker-side upgrade would be the plugin escalating itself.
+- After a successful update the page still runs the old UI bundle, so the button turns
+  into **Reload to finish**.
+- If the new version requests new capabilities, the host holds it for an administrator.
+  The panel says so; that is the capability gate working.
+- A plugin installed from a **folder on the server** cannot be updated from npm, because
+  the host's upgrade re-reads that folder. The panel names the folder, and the button
+  reads **Reload from folder**. Put the new build in the folder first.
+
 ## Design notes
 
 These were established by characterizing the real CLI, not by guessing.

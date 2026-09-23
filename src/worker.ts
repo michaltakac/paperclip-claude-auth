@@ -62,10 +62,27 @@ const sessions = new Map<
     session: SetupTokenSession;
     tokenDelivered: boolean;
     ownerUserId: string;
+    /** When the owner last polled or acted. See ABANDONED_AFTER_MS. */
+    lastSeenAt: number;
     /** Cached so concurrent polls test the token once, not once each. */
     verification?: Promise<VerifyResult>;
   }
 >();
+
+/**
+ * How long a sign-in may go without its owner before anyone may replace it.
+ *
+ * The UI polls every ~1.2s while a sign-in is open, so 30s of silence means the
+ * tab was closed or the person walked away. Without this, one abandoned attempt
+ * locked every other person out of the company's sign-in until the 10-minute
+ * session deadline — reported as "[object Object]" on the page, which is how
+ * it was found.
+ *
+ * Replacing an abandoned sign-in is safe: it is cancelled, its PTY dies with
+ * its token unminted, and the new owner gets a fresh flow of their own. Nobody
+ * can collect the previous owner's credential this way.
+ */
+export const ABANDONED_AFTER_MS = 30 * 1000;
 
 /**
  * The redacted transcript of the last finished sign-in, kept per company.
@@ -134,13 +151,33 @@ function requireActor(context: PluginPerformActionContext): {
   return { companyId, userId: context.actor.userId };
 }
 
-/** The session for this company, if the caller is the one who started it. */
+let now: () => number = Date.now;
+
+function isAbandoned(entry: { lastSeenAt: number }): boolean {
+  return now() - entry.lastSeenAt > ABANDONED_AFTER_MS;
+}
+
+function busyError(): Error {
+  return new Error(
+    "Another person is signing in to Claude right now. If they have left the page, " +
+      `you can start your own sign-in in about ${Math.round(ABANDONED_AFTER_MS / 1000)} seconds.`,
+  );
+}
+
+/**
+ * The session for this company, if the caller is the one who started it.
+ *
+ * Someone else's abandoned sign-in reads as no sign-in at all, so the page
+ * offers a fresh start instead of an error.
+ */
 function ownedSession(companyId: string, userId: string) {
   const entry = sessions.get(companyId);
   if (!entry) return null;
   if (entry.ownerUserId !== userId) {
-    throw new Error("Another person is signing in to Claude right now. Try again shortly.");
+    if (isAbandoned(entry)) return null;
+    throw busyError();
   }
+  entry.lastSeenAt = now();
   return entry;
 }
 
@@ -212,10 +249,11 @@ export type StartSession = typeof startSetupTokenSession;
  * an assertion into a coincidence, so every call resets it.
  */
 export function createClaudeAuthPlugin(
-  deps: { startSession?: StartSession; verify?: typeof verifyToken } = {},
+  deps: { startSession?: StartSession; verify?: typeof verifyToken; now?: () => number } = {},
 ) {
   const startSession = deps.startSession ?? startSetupTokenSession;
   const verify = deps.verify ?? verifyToken;
+  now = deps.now ?? Date.now;
   sessions.clear();
   lastTranscripts.clear();
   cachedConfig = null;
@@ -225,12 +263,14 @@ export function createClaudeAuthPlugin(
     ctx.actions.register(ACTIONS.start, async (_input, context) => {
       const { companyId, userId } = requireActor(context);
 
-      // Replace only your own attempt. Someone else's live sign-in is not
-      // yours to cancel, and cancelling it would let a second principal
-      // displace a flow whose token they could then collect.
+      // Replace your own attempt, or someone else's abandoned one. Someone
+      // else's *live* sign-in is not yours to cancel.
       const existing = sessions.get(companyId);
+      if (existing && existing.ownerUserId !== userId && !isAbandoned(existing)) {
+        throw busyError();
+      }
       if (existing && existing.ownerUserId !== userId) {
-        throw new Error("Another person is signing in to Claude right now. Try again shortly.");
+        ctx.logger.info("Replacing an abandoned Claude sign-in", { companyId });
       }
       existing?.session.cancel("Replaced by a new sign-in.");
 
@@ -245,7 +285,12 @@ export function createClaudeAuthPlugin(
           }
         },
       });
-      sessions.set(companyId, { session, tokenDelivered: false, ownerUserId: userId });
+      sessions.set(companyId, {
+        session,
+        tokenDelivered: false,
+        ownerUserId: userId,
+        lastSeenAt: now(),
+      });
 
       ctx.activity
         .log({ companyId, message: "Claude sign-in started." })
