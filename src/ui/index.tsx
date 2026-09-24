@@ -27,6 +27,8 @@ import {
 } from "@paperclipai/plugin-sdk/ui";
 import type { PluginWidgetProps } from "@paperclipai/plugin-sdk/ui";
 import { bindTokenToAgents, describeBindOutcome } from "./agents.js";
+import { errorMessage } from "./errors.js";
+import { findSelf, isNewer, upgradeSelf, type SelfInfo } from "./update.js";
 import {
   describeTokenSecret,
   findTokenSecret,
@@ -45,7 +47,7 @@ type Status = {
 
 type Ui =
   | { view: "loading" }
-  | { view: "idle" }
+  | { view: "idle"; notice?: string }
   | { view: "starting" }
   | { view: "authorize"; url: string; code: string; error?: string }
   | { view: "submitting"; url: string }
@@ -175,7 +177,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
           } catch (error) {
             connected =
               "The token is stored, but connecting it to your agents failed: " +
-              `${error instanceof Error ? error.message : String(error)}. ` +
+              `${errorMessage(error)}. ` +
               "Add it manually under Secrets → Agent access.";
           }
           const message = `${stored} ${connected}`;
@@ -183,7 +185,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
           void refreshSummary();
           toast({ title: "Claude sign-in complete", body: message, tone: "success" });
         } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
+          const reason = errorMessage(error);
           setUi({
             view: "error",
             message:
@@ -218,8 +220,10 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         } else {
           setUi({ view: "idle" });
         }
-      } catch {
-        if (!cancelled) setUi({ view: "idle" });
+      } catch (error) {
+        // Usually someone else's sign-in is in progress. Say so here rather
+        // than letting the click on "Sign in" be the first to find out.
+        if (!cancelled) setUi({ view: "idle", notice: errorMessage(error, "") || undefined });
       }
     })();
     return () => {
@@ -295,7 +299,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         setUi({ view: "authorize", url: status.authorizationUrl, code: "" });
       }
     } catch (error) {
-      setUi({ view: "error", message: error instanceof Error ? error.message : String(error) });
+      setUi({ view: "error", message: errorMessage(error) });
     }
   };
 
@@ -313,7 +317,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         view: "authorize",
         url,
         code: "",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   };
@@ -333,7 +337,7 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
     } catch (error) {
       setUi({
         view: "error",
-        message: `Could not connect your agents: ${error instanceof Error ? error.message : String(error)}`,
+        message: `Could not connect your agents: ${errorMessage(error)}`,
       });
     }
   };
@@ -361,10 +365,17 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         </p>
       </header>
 
+      <UpdateRow toast={toast} />
+
       {ui.view === "loading" && <Spinner size="sm" label="Checking sign-in state" />}
 
       {ui.view === "idle" && (
         <div style={{ display: "grid", gap: 12 }}>
+          {ui.notice && (
+            <p role="status" style={{ margin: 0, color: "var(--warning, #fbbf24)" }}>
+              {ui.notice}
+            </p>
+          )}
           <TokenSummary summary={summary} />
           <div>
             <button type="button" onClick={onStart} style={PRIMARY}>
@@ -499,6 +510,128 @@ function ClaudeAuthSettings({ companyId }: { companyId: string }) {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * Version and update control.
+ *
+ * Paperclip has no UI for upgrading an installed plugin. The upgrade endpoint
+ * and the host's own API client both exist, but nothing calls them, so a fix
+ * shipped to npm otherwise never reaches the people running the plugin. This
+ * row reads the installed version from the host, asks npm for the latest, and
+ * offers the upgrade the host already knows how to perform.
+ */
+function UpdateRow({ toast }: { toast: ReturnType<typeof usePluginToast> }) {
+  const [self, setSelf] = useState<SelfInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setSelf(await findSelf());
+      setError(null);
+    } catch (e) {
+      setError(errorMessage(e, "Could not read the plugin's version."));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const onUpdate = useCallback(async () => {
+    if (!self) return;
+    setBusy(true);
+    try {
+      const outcome = await upgradeSelf(self);
+      if (outcome.kind === "unchanged") {
+        toast({
+          title: self.localPath ? "Reloaded" : "Already up to date",
+          body: self.localPath
+            ? `Reloaded ${outcome.version} from ${self.localPath}. Put a newer build there to update.`
+            : `Version ${outcome.version} is the latest.`,
+          tone: "success",
+        });
+        void load();
+      } else if (outcome.kind === "approval_required") {
+        toast({
+          title: "Update needs approval",
+          body: "The new version requests capabilities the installed one did not. An instance administrator has to approve it.",
+          tone: "error",
+        });
+      } else {
+        // The page still runs the old UI bundle; the host swapped only the
+        // worker. Say so rather than look finished.
+        setDone(true);
+        toast({ title: "Updated", body: "Reload the page to load the new plugin UI.", tone: "success" });
+      }
+    } catch (e) {
+      toast({
+        title: "Update failed",
+        body: errorMessage(e, "The upgrade did not complete."),
+        tone: "error",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [self, toast, load]);
+
+  if (error) return <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>{error}</p>;
+  if (!self) return null;
+
+  const muted: React.CSSProperties = { opacity: 0.7, fontSize: 13 };
+  let state: React.ReactNode;
+  if (self.localPath) {
+    // The host's upgrade re-reads the folder and never contacts npm.
+    state = (
+      <span style={muted}>
+        Installed from {self.localPath}
+        {self.latestVersion && isNewer(self.latestVersion, self.installedVersion)
+          ? ` (npm has ${self.latestVersion})`
+          : ""}
+      </span>
+    );
+  } else if (self.updateAvailable && self.latestVersion) {
+    state = <StatusBadge label={`${self.latestVersion} available`} status="info" />;
+  } else if (self.latestVersion) {
+    state = <span style={muted}>Up to date</span>;
+  } else {
+    state = <span style={muted}>Could not reach the registry</span>;
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flexWrap: "wrap",
+        paddingBottom: 12,
+        borderBottom: "1px solid var(--border, #3f3f46)",
+      }}
+    >
+      <span style={muted}>Version {self.installedVersion}</span>
+      {done ? (
+        <button type="button" style={PRIMARY} onClick={() => window.location.reload()}>
+          Reload to finish
+        </button>
+      ) : (
+        <>
+          {state}
+          <button type="button" style={SECONDARY} disabled={busy} onClick={() => void onUpdate()}>
+            {busy
+              ? "Updating…"
+              : self.localPath
+                ? "Reload from folder"
+                : self.updateAvailable
+                  ? "Update"
+                  : "Check and update"}
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 

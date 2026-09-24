@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
-import { createClaudeAuthPlugin } from "../src/worker.js";
+import { ABANDONED_AFTER_MS, createClaudeAuthPlugin } from "../src/worker.js";
 import type { SetupTokenPhase } from "../src/setup-token/parse.js";
 import type { SetupTokenSession } from "../src/setup-token/session.js";
 
@@ -46,13 +46,18 @@ function fakeSession(initial: SetupTokenPhase = { kind: "awaiting_code", authori
   };
 }
 
+/** Test clock, so abandonment can be driven without waiting. */
+const clock = { t: 1_000_000 };
+
 function setup(initial?: SetupTokenPhase, verdict: { ok: true } | { ok: false; reason: string } = { ok: true }) {
   const fake = fakeSession(initial);
+  clock.t = 1_000_000;
   const harness = createTestHarness({ manifest });
   const plugin = createClaudeAuthPlugin({
     startSession: () => fake.session,
     // Never spawn the real CLI in tests; the live check has its own coverage.
     verify: async () => verdict,
+    now: () => clock.t,
   });
   return { harness, plugin, fake };
 }
@@ -174,6 +179,29 @@ describe("a sign-in belongs to the person who started it", () => {
   it("does not let another user displace a live sign-in by starting their own", async () => {
     const { harness, fake } = await boot();
     await harness.performAction("start", {}, asUser(ALICE));
+    await expect(harness.performAction("start", {}, asUser(BOB))).rejects.toThrow(
+      /another person/i,
+    );
+    expect(fake.cancelled).toBeNull();
+  });
+
+  it("lets another user replace a sign-in its owner abandoned", async () => {
+    const { harness, fake } = await boot();
+    await harness.performAction("start", {}, asUser(ALICE));
+    clock.t += ABANDONED_AFTER_MS + 1;
+
+    // The page load poll must not report an error for a dead attempt.
+    await expect(harness.performAction("poll", {}, asUser(BOB))).resolves.toEqual({ state: "idle" });
+    await expect(harness.performAction("start", {}, asUser(BOB))).resolves.toBeTruthy();
+    expect(fake.cancelled).toMatch(/replaced/i);
+  });
+
+  it("does not treat a sign-in its owner is still polling as abandoned", async () => {
+    const { harness, fake } = await boot();
+    await harness.performAction("start", {}, asUser(ALICE));
+    clock.t += ABANDONED_AFTER_MS - 1000;
+    await harness.performAction("poll", {}, asUser(ALICE));
+    clock.t += ABANDONED_AFTER_MS - 1000;
     await expect(harness.performAction("start", {}, asUser(BOB))).rejects.toThrow(
       /another person/i,
     );

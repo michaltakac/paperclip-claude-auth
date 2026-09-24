@@ -1,6 +1,6 @@
 {
   "name": "paperclip-claude-auth",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "type": "module",
   "description": "Sign in to Claude from the Paperclip UI. Drives `claude setup-token` on a pseudo-terminal and stores the resulting 1-year token where the claude_local adapter reads it. Works on local environments.",
   "license": "MIT",
@@ -37,7 +37,7 @@
     "@paperclipai/plugin-sdk": ">=2026.707.0"
   },
   "devDependencies": {
-    "@paperclipai/plugin-sdk": "2026.707.0",
+    "@paperclipai/plugin-sdk": "^2026.916.1",
     "@types/node": "^26.4.0",
     "@types/react": "^19.2.18",
     "esbuild": "^0.28.2",

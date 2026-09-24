@@ -10,6 +10,7 @@
  * better authorization anyway.
  */
 
+import { errorMessage } from "./errors.js";
 import { TOKEN_SECRET_KEY } from "./secrets.js";
 
 /** Only agents on this adapter consume a Claude subscription token. */
@@ -100,7 +101,7 @@ export async function bindTokenToAgents(
     } catch (error) {
       outcome.failed.push({
         name: label,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: errorMessage(error),
       });
     }
   }
