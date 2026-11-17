@@ -127,10 +127,14 @@ export function renderTerminalText(raw: string): string {
     // is ONE break, not two: mapping each half separately inserted a blank line
     // after every real line, which made a wrapped token look like it had ended
     // and truncated the credential.
+    // Claude Code 2.1.326 emits CRLF itself and the PTY's onlcr makes it
+    // CR CR LF, so any run of CRs ending in LF is also ONE break.
     if (char === "\r" || char === "\n") {
       out += "\n";
       column = 0;
-      i += char === "\r" && source[i + 1] === "\n" ? 2 : 1;
+      let j = i;
+      while (source[j] === "\r") j += 1;
+      i = source[j] === "\n" ? j + 1 : i + 1;
       continue;
     }
 
