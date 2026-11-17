@@ -227,6 +227,23 @@ describe("extractToken across a terminal wrap", () => {
   it("reports success with the whole token", () => {
     expect(derivePhase(wrappedSuccess)).toEqual({ kind: "succeeded", token: WRAPPED_TOKEN });
   });
+
+  /**
+   * Regression (Claude Code 2.1.326): the CLI now ends lines with CRLF itself,
+   * and the PTY's onlcr turns that into CR CR LF. Read as a lone CR plus a CRLF,
+   * every line break became two, the blank "line" between the token's halves
+   * ended it, and the truncated token was rejected with `401 OAuth access token
+   * is invalid` (MHA, 2026-11-17).
+   */
+  it("treats CR CR LF as one break, with column-positioned indents", () => {
+    const crcrlf =
+      "\x1b[2G✓\x1b[4GLong-lived\x1b[15Gauthentication\x1b[30Gtoken\x1b[36Gcreated\x1b[44Gsuccessfully!\r\r\n\r\r\n" +
+      "\x1b[2GYour\x1b[7GOAuth\x1b[13Gtoken\x1b[19G(valid\x1b[26Gfor\x1b[30G1\x1b[32Gyear):\r\r\n\r\r\n" +
+      "\x1b[2G" + WRAPPED_TOKEN.slice(0, 78) + "\r\r\n" +
+      "\x1b[2G" + WRAPPED_TOKEN.slice(78) + "\r\r\n\r\r\n" +
+      "\x1b[2GStore\x1b[8Gthis\x1b[13Gtoken\x1b[19Gsecurely.\r\r\n";
+    expect(extractToken(crcrlf)).toBe(WRAPPED_TOKEN);
+  });
 });
 
 /**
